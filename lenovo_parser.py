@@ -175,6 +175,11 @@ def parse_specs(items):
         if r[key] == "-" and value:
             r[key] = value.rstrip(";").strip() if isinstance(value, str) else str(value)
 
+    def set_from_detail(key, value):
+        """Set value from detail page, overriding generic 'Так'/'Є' placeholders."""
+        if value and (r[key] in ("-", "Так", "Є")):
+            r[key] = value.rstrip(";").strip() if isinstance(value, str) else str(value)
+
     full_text = " ".join([str(item).lower() for item in items if item])
 
     # Первый проход: ищем RAM_Type (DDR тип) - это важно сделать в первую очередь
@@ -503,6 +508,23 @@ def parse_specs(items):
                     val = re.sub(r'^маніпулятори\s*', '', e, flags=re.I).strip()
                     if val and val.lower() != "немає":
                         set_if_empty("Keyboard_Pointing_Device", val)
+                elif re.match(r'3g/4g\s', el):
+                    val = re.sub(r'^3g/4g\s*', '', e, flags=re.I).strip()
+                    if val:
+                        set_from_detail("Network_3G4G", val)
+                elif re.match(r'bluetooth\s', el):
+                    val = re.sub(r'^bluetooth\s*', '', e, flags=re.I).strip()
+                    if val and val.lower() != "немає":
+                        set_from_detail("Bluetooth", val)
+                elif re.match(r'wi-fi\s', el):
+                    val = re.sub(r'^wi-fi\s*', '', e, flags=re.I).strip()
+                    if val and val.lower() != "немає":
+                        set_from_detail("WiFi", val)
+                        set_from_detail("Merezha_WiFi", val)
+                elif re.match(r'lan\s*rj-45', el):
+                    val = re.sub(r'^lan\s*rj-45[,\s]*(?:мбіт/с\s*)?', '', e, flags=re.I).strip()
+                    if val and val.lower() != "немає":
+                        set_from_detail("LAN_Mbps", val)
             if usb_a_parts:
                 set_if_empty("USB_TypeA", " / ".join(usb_a_parts))
             if usb_c_parts:
@@ -527,21 +549,19 @@ def parse_specs(items):
                 set_if_empty("Keyboard_Ukrainian", "Так")
             if RE_TOUCHPAD.search(sl):
                 set_if_empty("Keyboard_Pointing_Device", "Так")
-
-        # Network
-        if RE_3G4G.search(sl):
-            set_if_empty("Network_3G4G", "Так")
-        if RE_BLUETOOTH.search(sl):
-            set_if_empty("Bluetooth", "Так")
-        if RE_WIFI.search(sl):
-            set_if_empty("WiFi", "Так")
-            set_if_empty("Merezha_WiFi", "Так")
-        if RE_LAN.search(sl):
-            m = re.search(r'(\d{3,4})\s*мбіт', sl)
-            if m:
-                set_if_empty("LAN_Mbps", m.group(0))
-            else:
-                set_if_empty("LAN_Mbps", "Так")
+            if RE_3G4G.search(sl):
+                set_if_empty("Network_3G4G", "Так")
+            if RE_BLUETOOTH.search(sl):
+                set_if_empty("Bluetooth", "Так")
+            if RE_WIFI.search(sl):
+                set_if_empty("WiFi", "Так")
+                set_if_empty("Merezha_WiFi", "Так")
+            if RE_LAN.search(sl):
+                m = re.search(r'(\d{3,4})\s*мбіт', sl)
+                if m:
+                    set_if_empty("LAN_Mbps", m.group(0))
+                else:
+                    set_if_empty("LAN_Mbps", "Так")
 
         # Warranty
         if RE_WARRANTY.search(sl):
