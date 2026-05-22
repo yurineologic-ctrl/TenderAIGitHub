@@ -15,7 +15,7 @@ CATALOG_URL = "https://shop.lenovo.ua/category/notebooks"
 OUTPUT_PATH = Path.home() / "Desktop" / "NOUT.xlsx"
 PAGE_TIMEOUT = 30_000  # 30 сек - сайт загружается медленно
 LOAD_DETAIL_PAGES = True  # Загружаем детали со страницы товара для полной информации
-MAX_ITEMS = 5  # Лимит на количество товаров для сбора (100 товаров для полного анализа)
+MAX_ITEMS = 100  # Лимит на количество товаров для сбора (100 товаров для полного анализа)
 
 COLUMNS = [
     "Seria", "Model", "Part Number",
