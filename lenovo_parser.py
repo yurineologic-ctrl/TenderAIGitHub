@@ -417,6 +417,8 @@ def parse_specs(items):
                             # Clean up extra specs (memory, etc)
                             gpu_text = re.sub(r',.*', '', gpu_text).strip()
                             gpu_text = re.sub(r'\d+\s*(?:гб|gb|мб|mb)', '', gpu_text, flags=re.I).strip()
+                            # Remove part numbers in parentheses (e.g., "(83Ly00Tgra)")
+                            gpu_text = re.sub(r'\s*\([^)]*\)', '', gpu_text).strip()
                             if len(gpu_text) > 3 and len(gpu_text) < 60:
                                 set_if_empty("GPU_Model", gpu_text.title())
 
