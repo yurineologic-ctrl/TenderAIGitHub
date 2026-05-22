@@ -530,9 +530,9 @@ def parse_specs(items):
                     if val:
                         set_from_detail("Certificates", val)
                 elif re.match(r'термін\s*базово', el):
-                    val = re.sub(r'^термін\s*базово\S*\s*гаранті\S*\s*від\s*виробника\s*', '', e, flags=re.I).strip()
-                    if val:
-                        set_from_detail("Warranty", val)
+                    m = re.search(r'(\d+\s*(?:рік|роки|років|місяц\w*))', e, re.I)
+                    if m:
+                        set_from_detail("Warranty", m.group(1).strip())
             if usb_a_parts:
                 set_if_empty("USB_TypeA", " / ".join(usb_a_parts))
             if usb_c_parts:
