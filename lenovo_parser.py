@@ -69,7 +69,7 @@ RE_USB_A = re.compile(r'\b(?:usb(?:\s*type-?a|\s*a)|usb-a|type-?a)\b', re.I)
 RE_USB_C = re.compile(r'\b(?:usb(?:\s*type-?c|\s*c)|usb-c|type-?c)\b', re.I)
 RE_HDMI = re.compile(r'\bhdmi\b', re.I)
 RE_DISPLAYPORT = re.compile(r'\b(?:displayport|dp)\b', re.I)
-RE_PORTS = re.compile(r"\b(?:порт|роз['']єм|розєм)\b", re.I)
+RE_PORTS = re.compile(r"\b(?:порт(?:и)?|роз['']єм(?:и)?|розєм(?:и)?)\b", re.I)
 RE_WATERPROOF = re.compile(r'\b(?:вологозахист|водозахист|waterproof)\b', re.I)
 RE_UKRAINIAN = re.compile(r'\b(?:україн|укр)\b', re.I)
 RE_TOUCHPAD = re.compile(r'\b(?:тачпад|маніпулятор|трекпоінт|touchpad|trackpad)\b', re.I)
@@ -465,17 +465,50 @@ def parse_specs(items):
                 if camera_text and camera_text != "Немає":
                     set_if_empty("Camera_MP", camera_text)
 
-        # Ports
-        if RE_USB_A.search(sl):
-            set_if_empty("USB_TypeA", "USB Type-A")
-        if RE_USB_C.search(sl):
-            set_if_empty("USB_TypeC", "USB Type-C")
-        if RE_HDMI.search(sl):
-            set_if_empty("HDMI", "HDMI")
-        if RE_DISPLAYPORT.search(sl):
-            set_if_empty("DisplayPort", "DisplayPort")
-        if RE_PORTS.search(sl):
-            set_if_empty("Ports", s)
+        # Ports — split on ‖ separator and match by label prefix
+        if "‖" in s:
+            usb_a_parts, usb_c_parts, dp_parts = [], [], []
+            for entry in s.split("‖"):
+                e = entry.strip()
+                el = e.lower()
+                if re.match(r'usb\s*type-?a\s', el):
+                    val = re.sub(r'^USB\s*Type-?A\s*', '', e, flags=re.I).strip()
+                    if val:
+                        usb_a_parts.append(val)
+                elif re.match(r'usb[\s-]*type-?c\s', el):
+                    val = re.sub(r'^usb[\s-]*type-?c\s*', '', e, flags=re.I).strip()
+                    if val:
+                        usb_c_parts.append(val)
+                elif re.match(r'hdmi[,\s]', el):
+                    val = re.sub(r'^hdmi[,\s]*(?:шт\.?\s+)?', '', e, flags=re.I).strip()
+                    if val:
+                        set_if_empty("HDMI", val)
+                elif re.match(r'displayport[,\s]', el):
+                    val = re.sub(r'^displayport[,\s]*(?:шт\.?\s+)?', '', e, flags=re.I).strip()
+                    if val:
+                        dp_parts.append(val)
+                elif re.match(r'порти\s', el):
+                    val = re.sub(r'^порти\s*', '', e, flags=re.I).strip()
+                    if val and val.lower() != "немає":
+                        set_if_empty("Ports", val)
+            if usb_a_parts:
+                set_if_empty("USB_TypeA", " / ".join(usb_a_parts))
+            if usb_c_parts:
+                set_if_empty("USB_TypeC", " / ".join(usb_c_parts))
+            if dp_parts:
+                set_if_empty("DisplayPort", " / ".join(dp_parts))
+        else:
+            # Fallback for items without ‖ separator (catalog card items)
+            if RE_USB_A.search(sl):
+                set_if_empty("USB_TypeA", s.strip())
+            if RE_USB_C.search(sl):
+                set_if_empty("USB_TypeC", s.strip())
+            if RE_HDMI.search(sl):
+                set_if_empty("HDMI", s.strip())
+            if RE_DISPLAYPORT.search(sl):
+                set_if_empty("DisplayPort", s.strip())
+            if RE_PORTS.search(sl):
+                set_if_empty("Ports", s.strip())
 
         # Keyboard
         if RE_WATERPROOF.search(sl):
@@ -574,7 +607,7 @@ def fetch_detail_page_text(pg, url):
                 current = label_div.next_sibling
                 while current:
                     if hasattr(current, 'name') and current.name == 'div' and 'product-full-specs-value' in current.get('class', []):
-                        value_text = current.get_text(strip=True)
+                        value_text = current.get_text(separator=" ", strip=True)
                         if label_text and value_text:
                             # Формируем строку как "Label Value" для совместимости с regex
                             specs_text_parts.append(f"{label_text} {value_text}")
@@ -582,7 +615,8 @@ def fetch_detail_page_text(pg, url):
                     current = current.next_sibling
 
         if specs_text_parts:
-            specs_text = " ".join(specs_text_parts)
+            # Use ‖ as separator so per-field regex can stop cleanly at the next spec
+            specs_text = " ‖ ".join(specs_text_parts)
             return specs_text
 
         return ""
