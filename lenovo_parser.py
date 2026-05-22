@@ -465,7 +465,7 @@ def parse_specs(items):
                 if camera_text and camera_text != "Немає":
                     set_if_empty("Camera_MP", camera_text)
 
-        # Ports — split on ‖ separator and match by label prefix
+        # Ports & Keyboard — split on ‖ separator and match by label prefix
         if "‖" in s:
             usb_a_parts, usb_c_parts, dp_parts = [], [], []
             for entry in s.split("‖"):
@@ -491,6 +491,18 @@ def parse_specs(items):
                     val = re.sub(r'^порти\s*', '', e, flags=re.I).strip()
                     if val and val.lower() != "немає":
                         set_if_empty("Ports", val)
+                elif re.match(r'клавіатура\s*\(вологозахист\)', el):
+                    val = re.sub(r'^клавіатура\s*\(вологозахист\)\s*', '', e, flags=re.I).strip()
+                    if val:
+                        set_if_empty("Keyboard_Waterproof", val)
+                elif re.match(r'українська\s*мова\s', el):
+                    val = re.sub(r'^українська\s*мова\s*', '', e, flags=re.I).strip()
+                    if val:
+                        set_if_empty("Keyboard_Ukrainian", val)
+                elif re.match(r'маніпулятори\s', el):
+                    val = re.sub(r'^маніпулятори\s*', '', e, flags=re.I).strip()
+                    if val and val.lower() != "немає":
+                        set_if_empty("Keyboard_Pointing_Device", val)
             if usb_a_parts:
                 set_if_empty("USB_TypeA", " / ".join(usb_a_parts))
             if usb_c_parts:
@@ -509,14 +521,12 @@ def parse_specs(items):
                 set_if_empty("DisplayPort", s.strip())
             if RE_PORTS.search(sl):
                 set_if_empty("Ports", s.strip())
-
-        # Keyboard
-        if RE_WATERPROOF.search(sl):
-            set_if_empty("Keyboard_Waterproof", "Так")
-        if RE_UKRAINIAN.search(sl):
-            set_if_empty("Keyboard_Ukrainian", "Так")
-        if RE_TOUCHPAD.search(sl):
-            set_if_empty("Keyboard_Pointing_Device", "Так")
+            if RE_WATERPROOF.search(sl):
+                set_if_empty("Keyboard_Waterproof", "Так")
+            if RE_UKRAINIAN.search(sl):
+                set_if_empty("Keyboard_Ukrainian", "Так")
+            if RE_TOUCHPAD.search(sl):
+                set_if_empty("Keyboard_Pointing_Device", "Так")
 
         # Network
         if RE_3G4G.search(sl):
