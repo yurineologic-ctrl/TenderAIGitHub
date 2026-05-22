@@ -399,7 +399,7 @@ def parse_specs(items):
                     set_if_empty("GPU_Model", model_str)
                 else:
                     # Try integrated GPU patterns: Radeon 780M, Arc, Iris, Intel Graphics
-                    m = re.search(r'\b(?:radeon\s+\d{3}m|arc\s+\w+|iris\s+\w+|(?:intel\s+)?(?:uhd|hd|iris)\s+graphics)\b', sl, re.I)
+                    m = re.search(r'\b(?:radeon\s+\d{3}m|arc\s+\w+|iris\s+\w+|intel\s+graphics|(?:intel\s+)?(?:uhd|hd|iris)\s+graphics)\b', sl, re.I)
                     if m:
                         model_text = m.group(0).strip()
                         # Capitalize properly for Intel Graphics
