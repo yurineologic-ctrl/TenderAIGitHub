@@ -56,7 +56,7 @@ RE_CPU_FREQ = re.compile(r'(\d+(?:[\.,]\d+)?)\s*ггц', re.I)
 RE_CPU_CORES = re.compile(r'(\d+)\s*(?:ядер|ядра|cores?)', re.I)
 RE_CPU_THREADS = re.compile(r'(\d+)\s*(?:потоків|потоки|threads?)', re.I)
 RE_L3_CACHE = re.compile(r'\b(?:l3|кеш\s*l3|l3\s*кеш|cache\s*l3)\b', re.I)
-RE_DDR = re.compile(r'\bDDR\d(?:\.\d)?\b', re.I)
+RE_DDR = re.compile(r'\b(?:LP)?DDR\d(?:X\b|\b)', re.I)
 RE_RAM_FREQ = re.compile(r'\b(\d{3,4})\s*мгц\b', re.I)
 RE_RAM_SIZE = re.compile(r'\b(\d+)\s*(?:гб|gb)\b', re.I)
 RE_RAM_SLOT = re.compile(r'(\d{1,2})\s*слот|[xх]\s*([12])(?=\s|[^0-9]|$)', re.I)
@@ -480,6 +480,10 @@ def parse_specs(items):
                     val = re.sub(r'^(?:кеш\s*l3|l3\s*кеш)\s*', '', e, flags=re.I).strip()
                     if val:
                         set_if_empty("CPU_Cache_L3_MB", val)
+                elif re.match(r"тип\s*пам", el):
+                    m = re.search(r'\b(?:LP)?DDR\d(?:X\b|\b)', e, re.I)
+                    if m:
+                        set_if_empty("RAM_Type", m.group(0).upper())
                 elif re.match(r'usb\s*type-?a\s', el):
                     val = re.sub(r'^USB\s*Type-?A\s*', '', e, flags=re.I).strip()
                     if val:
