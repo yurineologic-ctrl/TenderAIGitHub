@@ -48,7 +48,7 @@ RE_DIAG = re.compile(r'(\d+(?:[\.,]\d+)?)\s*(?:"|дюйм|дюйма|inch|in\b)'
 RE_RESOLUTION = re.compile(r'\d{3,4}[xх]\d{3,4}|fhd|wuxga|qhd|wqxga|uhd|4k', re.I)
 RE_DISPLAY_TYPE = re.compile(r'\b(ips|oled|tn|va|retina)\b', re.I)
 RE_DISPLAY_COVER = re.compile(r'(антиблік|антибл|матов|глян|antiglare|gloss)', re.I)
-RE_BRIGHTNESS = re.compile(r'(\d+)\s*ніт')
+RE_BRIGHTNESS = re.compile(r'(?:яскравість|яскравость|brightness)[,:]?\s*(?:ніт|нит|nit)?\s*(\d+)|(\d+)\s*(?:ніт|нит|nit)', re.I)
 RE_CONTRAST = re.compile(r'контраст', re.I)
 RE_RESPONSE_TIME = re.compile(r'(\d+)\s*мс')
 RE_REFRESH_RATE = re.compile(r'(?:частота\s*оновлення|refresh\s*rate)|(?:гц.*?(?:екран|диспле|дисплей|панель|wuxga|fhd|qhd|uhd|4k|oled|ips|tn))', re.I)
@@ -246,7 +246,10 @@ def parse_specs(items):
         if RE_BRIGHTNESS.search(sl):
             m = RE_BRIGHTNESS.search(sl)
             if m:
-                set_if_empty("Display_Brightness_nits", m.group(0))
+                # Extract the number (could be in group 1 or 2 depending on which pattern matched)
+                brightness_val = m.group(1) or m.group(2)
+                if brightness_val:
+                    set_if_empty("Display_Brightness_nits", f"{brightness_val} nits")
         if RE_CONTRAST.search(sl):
             # Ищем значение контраста типа "1000:1" или просто пропускаем
             contrast_m = re.search(r'(?:контраст|contrast)[:\s]+(\d+(?:\.\d+)?(?:\s*:\s*\d+)?)', sl, re.I)

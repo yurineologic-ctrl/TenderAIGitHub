@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python)",
+      "Bash(python lenovo_parser.py)",
+      "Bash(Start-Sleep -Seconds 90)",
+      "Bash(Write-Output \"Execution should be complete\")",
+      "Bash(python -m py_compile lenovo_parser.py)",
+      "Bash(\".venv\\\\Scripts\\\\python.exe\" lenovo_parser.py)",
+      "Bash(tasklist)",
+      "Bash(findstr python *)",
+      "Bash(ls -la \"c:\\\\Users\\\\Швець\\\\Desktop\\\\NOUT.xlsx\" 2>nul || echo \"File not found yet\")",
+      "Bash(git add*)",
+      "Bash(git commit*)",
+      "Bash(git push*)",
+      "Bash(git checkout*)",
+      "Read(//c/Users/Швець/Desktop/**)"
+    ]
+  }
+}
