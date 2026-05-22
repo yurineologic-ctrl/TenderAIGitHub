@@ -15,7 +15,7 @@ CATALOG_URL = "https://shop.lenovo.ua/category/notebooks"
 OUTPUT_PATH = Path.home() / "Desktop" / "NOUT.xlsx"
 PAGE_TIMEOUT = 30_000  # 30 сек - сайт загружается медленно
 LOAD_DETAIL_PAGES = True  # Загружаем детали со страницы товара для полной информации
-MAX_ITEMS = 100  # Лимит на количество товаров для сбора (100 товаров для полного анализа)
+MAX_ITEMS = 5  # Лимит на количество товаров для сбора (100 товаров для полного анализа)
 
 COLUMNS = [
     "Seria", "Model", "Part Number",
@@ -28,7 +28,7 @@ COLUMNS = [
     "Display_Response_Time", "Display_Refresh_Rate",
     "Video_Brand", "GPU_Type", "GPU_Model", "GPU_Memory_MB",
     "OS",
-    "Audio_Power_W", "Camera_MP",
+    "Battery_Capacity_Wh", "Camera_MP",
     "USB_TypeA", "USB_TypeC", "HDMI", "DisplayPort", "Ports",
     "Keyboard_Waterproof", "Keyboard_Ukrainian", "Keyboard_Pointing_Device",
     "Network_3G4G", "Bluetooth", "WiFi", "LAN_Mbps",
@@ -63,8 +63,8 @@ RE_RAM_SLOT = re.compile(r'(\d{1,2})\s*слот|[xх]\s*([12])(?=\s|[^0-9]|$)', 
 RE_STORAGE = re.compile(r'\b(?:ssd|hdd)\b', re.I)
 RE_GPU = re.compile(r'\b(?:nvidia|geforce|rtx|gtx|radeon|intel graphics|arc|gpu|вбудован|дискретн)\b', re.I)
 RE_OS = re.compile(r'\b(?:windows|linux|без ос|ubuntu|dos)\b', re.I)
-RE_AUDIO = re.compile(r'(\d+)\s*вт.*?(?:акуст|звук|динамік|speaker)', re.I)
-RE_CAMERA = re.compile(r'\b(?:камера|web-камера|веб-камера|(\d+(?:[\.,]\d+)?)\s*мп)\b', re.I)
+RE_BATTERY = re.compile(r'(?:енергетична ємність|energy capacity|battery capacity)[,:]?\s*(?:(\d+)\s*)?(?:вт\*год|вт·год|wh|watt.?hour)?\s*(\d+)?', re.I)
+RE_CAMERA = re.compile(r'\b(?:камера|web-камера|веб-камера|hd|4k)|\d+\s*(?:мп|p)\b', re.I)
 RE_USB_A = re.compile(r'\b(?:usb(?:\s*type-?a|\s*a)|usb-a|type-?a)\b', re.I)
 RE_USB_C = re.compile(r'\b(?:usb(?:\s*type-?c|\s*c)|usb-c|type-?c)\b', re.I)
 RE_HDMI = re.compile(r'\bhdmi\b', re.I)
@@ -163,7 +163,7 @@ def parse_specs(items):
         "Display_Matrix_Type", "Display_Cover", "Display_Brightness_nits",
         "Display_Contrast", "Display_Response_Time", "Display_Refresh_Rate",
         "Video_Brand", "GPU_Type", "GPU_Model", "GPU_Memory_MB",
-        "OS", "Audio_Power_W", "Camera_MP", "USB_TypeA", "USB_TypeC",
+        "OS", "Battery_Capacity_Wh", "Camera_MP", "USB_TypeA", "USB_TypeC",
         "HDMI", "DisplayPort", "Ports", "Keyboard_Waterproof",
         "Keyboard_Ukrainian", "Keyboard_Pointing_Device", "Network_3G4G",
         "Bluetooth", "WiFi", "LAN_Mbps", "Certificates", "Warranty",
@@ -444,17 +444,26 @@ def parse_specs(items):
             if m:
                 set_if_empty("OS", m.group(0).title())
 
-        # Audio
-        if RE_AUDIO.search(sl):
-            m = RE_AUDIO.search(sl)
+        # Battery Capacity
+        if RE_BATTERY.search(sl):
+            m = RE_BATTERY.search(sl)
             if m:
-                set_if_empty("Audio_Power_W", m.group(0))
+                # Захватываем число, которое может быть в группе 1 или 2 (до или после единиц измерения)
+                val = m.group(1) or m.group(2)
+                if val:
+                    set_if_empty("Battery_Capacity_Wh", val + " Wh")
 
         # Camera
         if RE_CAMERA.search(sl):
-            m = re.search(r'(\d+(?:[\.,]\d+)?)\s*мп', sl)
+            # Извлекаем информацию о WEB-камере: текст между "WEB-камера" и "3D камера"
+            # Примеры: "WEB-камера, Мп HD 720p with E-shutter 3D камера Немає"
+            m = re.search(r'WEB-?[Кк]амера[,\s]*([^3]*?)\s*(?:3D|IR)\s*[Кк]амера', s, re.I)
             if m:
-                set_if_empty("Camera_MP", m.group(0))
+                camera_text = m.group(1).strip()
+                # Убираем "Мп" если оно есть в начале
+                camera_text = re.sub(r'^[Мм][Пп]\s*', '', camera_text)
+                if camera_text and camera_text != "Немає":
+                    set_if_empty("Camera_MP", camera_text)
 
         # Ports
         if RE_USB_A.search(sl):
@@ -630,7 +639,7 @@ def parse_cards_from_html(html, detail_page=None):
             "GPU_Model":         specs["GPU_Model"],
             "GPU_Memory_MB":     specs["GPU_Memory_MB"],
             "OS":                specs["OS"],
-            "Audio_Power_W":     specs["Audio_Power_W"],
+            "Battery_Capacity_Wh": specs["Battery_Capacity_Wh"],
             "Camera_MP":         specs["Camera_MP"],
             "USB_TypeA":         specs["USB_TypeA"],
             "USB_TypeC":         specs["USB_TypeC"],
@@ -738,7 +747,7 @@ def format_xlsx(path, total):
         "Display_Brightness_nits":"Яскравість, ніт", "Display_Contrast":"Контраст",
         "Display_Response_Time":"Час реагування", "Display_Refresh_Rate":"Частота оновлення",
         "Video_Brand":"Видео_Бренд", "GPU_Type":"Тип_GPU", "GPU_Model":"Модель GPU",
-        "GPU_Memory_MB":"Обсяг GPU, МБ", "OS":"ОС", "Audio_Power_W":"Потужність, Вт",
+        "GPU_Memory_MB":"Обсяг GPU, МБ", "OS":"ОС", "Battery_Capacity_Wh":"Енергетична ємність, Вт*год",
         "Camera_MP":"WEB-камера, Мп", "USB_TypeA":"USB Type-A", "USB_TypeC":"USB Type-C",
         "HDMI":"HDMI, шт.", "DisplayPort":"DisplayPort, шт.", "Ports":"Порти",
         "Keyboard_Waterproof":"Клавіатура (вологозахист)", "Keyboard_Ukrainian":"Українська мова",
