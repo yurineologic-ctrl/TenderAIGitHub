@@ -398,10 +398,16 @@ def parse_specs(items):
                     model_str = f"{prefix.group(0).upper()} {m.group(1)}"
                     set_if_empty("GPU_Model", model_str)
                 else:
-                    # Try integrated GPU patterns: Radeon 780M, Arc, Iris, Graphics
-                    m = re.search(r'\b(?:radeon\s+\d{3}m|arc\s+\w+|iris\s+\w+|graphics\s+\d{3,4})\b', sl, re.I)
+                    # Try integrated GPU patterns: Radeon 780M, Arc, Iris, Intel Graphics
+                    m = re.search(r'\b(?:radeon\s+\d{3}m|arc\s+\w+|iris\s+\w+|(?:intel\s+)?(?:uhd|hd|iris)\s+graphics)\b', sl, re.I)
                     if m:
-                        set_if_empty("GPU_Model", m.group(0).title())
+                        model_text = m.group(0).strip()
+                        # Capitalize properly for Intel Graphics
+                        if 'graphics' in model_text.lower():
+                            # Convert "intel uhd graphics" to "Intel UHD Graphics"
+                            parts = model_text.split()
+                            model_text = ' '.join([p.upper() if p.upper() in ['UHD', 'HD', 'XE'] else p.title() for p in parts])
+                        set_if_empty("GPU_Model", model_text)
                     else:
                         # Fallback: grab text after brand keyword, limited length
                         brand_m = re.search(r'(?:nvidia|geforce|amd|radeon|intel|arc)', sl, re.I)
