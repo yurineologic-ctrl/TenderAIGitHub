@@ -340,7 +340,7 @@ def parse_specs(items):
 
         if RE_L3_CACHE.search(sl):
             # Ищем "L3 ... 24 МБ" pattern или просто "L3 24" (может быть написано как ĭ L3 24)
-            m = re.search(r'l3[\s,]*(\d+)', sl, re.I)
+            m = re.search(r'l3[^0-9\n]{0,20}?(\d+)\s*(?:мб|mb)?', sl, re.I)
             if m:
                 set_if_empty("CPU_Cache_L3_MB", m.group(1) + " МБ")
 
@@ -476,7 +476,11 @@ def parse_specs(items):
             for entry in s.split("‖"):
                 e = entry.strip()
                 el = e.lower()
-                if re.match(r'usb\s*type-?a\s', el):
+                if re.match(r'(?:кеш\s*l3|l3\s*кеш)', el):
+                    val = re.sub(r'^(?:кеш\s*l3|l3\s*кеш)\s*', '', e, flags=re.I).strip()
+                    if val:
+                        set_if_empty("CPU_Cache_L3_MB", val)
+                elif re.match(r'usb\s*type-?a\s', el):
                     val = re.sub(r'^USB\s*Type-?A\s*', '', e, flags=re.I).strip()
                     if val:
                         usb_a_parts.append(val)
