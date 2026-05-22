@@ -525,6 +525,10 @@ def parse_specs(items):
                     val = re.sub(r'^lan\s*rj-45[,\s]*(?:мбіт/с\s*)?', '', e, flags=re.I).strip()
                     if val and val.lower() != "немає":
                         set_from_detail("LAN_Mbps", val)
+                elif re.match(r'сертифікати\s', el):
+                    val = re.sub(r'^сертифікати\s*', '', e, flags=re.I).strip()
+                    if val:
+                        set_from_detail("Certificates", val)
             if usb_a_parts:
                 set_if_empty("USB_TypeA", " / ".join(usb_a_parts))
             if usb_c_parts:
