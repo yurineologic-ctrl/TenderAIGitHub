@@ -286,20 +286,27 @@ def parse_specs(items):
         
         cpu_related = any(k in sl for k in ["intel", "amd", "ryzen", "snapdragon", "celeron", "pentium", "core", "xeon", "i3", "i5", "i7", "i9", "процес", "cpu"])
         if cpu_related and r["CPU_Model"] == "-":
-            if "intel" in sl:
-                m = re.search(r'\b(?:core i[3-9]|xeon|celeron|pentium)[^\s]*(?:\s+[a-z]?\d{3,5})?', sl)
-                if m:
-                    set_if_empty("CPU_Model", m.group(0).title())
-                else:
-                    set_if_empty("CPU_Model", s)
-            elif "amd" in sl or "ryzen" in sl:
-                m = re.search(r'\b(?:ryzen|athlon|a-series)[^\s]*(?:\s+[a-z]?\d{3,5})?', sl)
-                if m:
-                    set_if_empty("CPU_Model", m.group(0).title())
-                else:
-                    set_if_empty("CPU_Model", s)
+            # Strip "(кеш 24 МБ, до 4,9 ГГц)" type parenthetical and trademark symbols
+            clean = re.sub(r'\s*\([^)]*(?:мб|ггц|кеш|ghz|mb)[^)]*\)', '', s, flags=re.I).strip()
+            clean = re.sub(r'\s*[®™]\s*', ' ', clean).strip()
+            cl = clean.lower()
+            if "intel" in cl:
+                # Core i7-13650HX / Core 7 240H / Core Ultra 5 225U / Celeron / Xeon
+                m = re.search(r'Core(?:\s+Ultra)?\s+(?:i[3-9][\w-]+|\w+\s+\w+)', clean, re.I)
+                if not m:
+                    m = re.search(r'(?:Celeron|Pentium|Xeon)\s+[\w-]+', clean, re.I)
+                set_if_empty("CPU_Model", m.group(0).strip() if m else clean)
+            elif "amd" in cl or "ryzen" in cl:
+                # Ryzen 7 7435H / Ryzen 5 7530U
+                m = re.search(r'Ryzen\s+\d+\s+\d{4,5}\w*', clean, re.I)
+                if not m:
+                    m = re.search(r'(?:Ryzen|Athlon)\s+\w+(?:\s+\w+)?', clean, re.I)
+                set_if_empty("CPU_Model", m.group(0).strip() if m else clean)
+            elif "snapdragon" in cl:
+                m = re.search(r'Snapdragon\s+[\w\s-]+', clean, re.I)
+                set_if_empty("CPU_Model", m.group(0).strip() if m else clean)
             else:
-                set_if_empty("CPU_Model", s)
+                set_if_empty("CPU_Model", clean)
 
         if RE_CPU_CORES.search(sl):
             m = RE_CPU_CORES.search(sl)
