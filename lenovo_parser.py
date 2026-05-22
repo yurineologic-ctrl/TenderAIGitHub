@@ -529,6 +529,10 @@ def parse_specs(items):
                     val = re.sub(r'^сертифікати\s*', '', e, flags=re.I).strip()
                     if val:
                         set_from_detail("Certificates", val)
+                elif re.match(r'термін\s*базово', el):
+                    val = re.sub(r'^термін\s*базово\S*\s*гаранті\S*\s*від\s*виробника\s*', '', e, flags=re.I).strip()
+                    if val:
+                        set_from_detail("Warranty", val)
             if usb_a_parts:
                 set_if_empty("USB_TypeA", " / ".join(usb_a_parts))
             if usb_c_parts:
@@ -821,7 +825,7 @@ def format_xlsx(path, total):
         "Keyboard_Waterproof":"Клавіатура (вологозахист)", "Keyboard_Ukrainian":"Українська мова",
         "Keyboard_Pointing_Device":"Маніпулятори", "Network_3G4G":"3G/4G",
         "Bluetooth":"Bluetooth", "WiFi":"Wi-Fi", "LAN_Mbps":"LAN RJ-45, Мбіт/с",
-        "Certificates":"Сертифікати", "Warranty":"Тип базової гарантії від виробника",
+        "Certificates":"Сертифікати", "Warranty":"Термін базової гарантії від виробника",
         "Merezha_WiFi":"Мережа / Wi-Fi", "Tsina_UAH":"Ціна (UAH)", "URL":"URL",
     }
     for i, k in enumerate(COLUMNS, 1):
