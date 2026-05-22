@@ -388,6 +388,8 @@ def parse_specs(items):
                     set_if_empty("Video_Brand", "AMD")
                 elif "intel" in sl_lower or "arc" in sl_lower:
                     set_if_empty("Video_Brand", "Intel")
+                elif "qualcomm" in sl_lower or "adreno" in sl_lower:
+                    set_if_empty("Video_Brand", "Qualcomm")
 
             # Extract GPU Model
             if r["GPU_Model"] == "-":
@@ -398,8 +400,8 @@ def parse_specs(items):
                     model_str = f"{prefix.group(0).upper()} {m.group(1)}"
                     set_if_empty("GPU_Model", model_str)
                 else:
-                    # Try integrated GPU patterns: Radeon 780M, Arc, Iris, Intel Graphics
-                    m = re.search(r'\b(?:radeon\s+\d{3}m|arc\s+\w+|iris\s+\w+|intel\s+graphics|(?:intel\s+)?(?:uhd|hd|iris)\s+graphics)\b', sl, re.I)
+                    # Try integrated GPU patterns: Radeon 780M, Arc, Iris, Intel Graphics, Qualcomm Adreno
+                    m = re.search(r'\b(?:radeon\s+\d{3}m|arc\s+\w+|iris\s+\w+|intel\s+graphics|(?:intel\s+)?(?:uhd|hd|iris)\s+graphics|(?:qualcomm\s+)?adreno\s+gpu)\b', sl, re.I)
                     if m:
                         model_text = m.group(0).strip()
                         # Capitalize properly for Intel Graphics
@@ -410,7 +412,7 @@ def parse_specs(items):
                         set_if_empty("GPU_Model", model_text)
                     else:
                         # Fallback: grab text after brand keyword, limited length
-                        brand_m = re.search(r'(?:nvidia|geforce|amd|radeon|intel|arc)', sl, re.I)
+                        brand_m = re.search(r'(?:nvidia|geforce|amd|radeon|intel|arc|qualcomm|adreno)', sl, re.I)
                         if brand_m:
                             start = brand_m.start()
                             gpu_text = sl[start:].strip()
@@ -428,7 +430,7 @@ def parse_specs(items):
                 if r["Video_Brand"] == "NVIDIA" or "rtx" in sl_lower or "gtx" in sl_lower or "radeon rx" in sl_lower:
                     set_if_empty("GPU_Type", "дискретна")
                 # Check if integrated GPU
-                elif r["Video_Brand"] == "Intel" or "radeon 780m" in sl_lower or "iris" in sl_lower or "arc" in sl_lower or "graphics" in sl_lower:
+                elif r["Video_Brand"] == "Intel" or r["Video_Brand"] == "Qualcomm" or "radeon 780m" in sl_lower or "iris" in sl_lower or "arc" in sl_lower or "graphics" in sl_lower or "adreno" in sl_lower:
                     set_if_empty("GPU_Type", "інтегрована")
                 # AMD APU check
                 elif r["Video_Brand"] == "AMD" and "radeon 680m" in sl_lower or "radeon 780m" in sl_lower:
