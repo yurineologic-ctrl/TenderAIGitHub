@@ -26,7 +26,7 @@ COLUMNS = [
     "Display_Diagonal", "Display_Max_Resolution", "Display_Matrix_Type",
     "Display_Cover", "Display_Brightness_nits", "Display_Contrast",
     "Display_Response_Time", "Display_Refresh_Rate",
-    "Videokarta", "GPU_Adapter", "GPU_Model", "GPU_Memory_MB",
+    "Video_Brand", "GPU_Type", "GPU_Model", "GPU_Memory_MB",
     "OS",
     "Audio_Power_W", "Camera_MP",
     "USB_TypeA", "USB_TypeC", "HDMI", "DisplayPort", "Ports",
@@ -162,7 +162,7 @@ def parse_specs(items):
         "Nakopychuvach_SSD", "Display_Diagonal", "Display_Max_Resolution",
         "Display_Matrix_Type", "Display_Cover", "Display_Brightness_nits",
         "Display_Contrast", "Display_Response_Time", "Display_Refresh_Rate",
-        "Videokarta", "GPU_Adapter", "GPU_Model", "GPU_Memory_MB",
+        "Video_Brand", "GPU_Type", "GPU_Model", "GPU_Memory_MB",
         "OS", "Audio_Power_W", "Camera_MP", "USB_TypeA", "USB_TypeC",
         "HDMI", "DisplayPort", "Ports", "Keyboard_Waterproof",
         "Keyboard_Ukrainian", "Keyboard_Pointing_Device", "Network_3G4G",
@@ -365,23 +365,68 @@ def parse_specs(items):
 
         # GPU
         if RE_GPU.search(sl):
-            set_if_empty("Videokarta", s)
-            set_if_empty("GPU_Adapter", s)
-            if r["GPU_Model"] == "-":
-                m = re.search(r'\b(?:rtx|gtx|radeon rx)\s*\d{3,4}', sl)
+            sl_lower = sl.lower()
+
+            # Extract GPU Memory - look for "обсяг gpu" or just numbers after GPU keywords
+            if r["GPU_Memory_MB"] == "-":
+                # First try: memory value with units (GB/ГБ/МБ)
+                m = re.search(r'\b(\d+)\s*(?:гб|gb)\b', sl, re.I)
                 if m:
-                    set_if_empty("GPU_Model", m.group(0).upper())
+                    set_if_empty("GPU_Memory_MB", m.group(1) + " GB")
                 else:
-                    m = re.search(r'(?:nvidia|geforce|radeon|intel graphics|arc)[^\d]*(\d+)', sl)
+                    # Second try: just memory number if it follows GPU memory label
+                    if "обсяг gpu" in sl_lower or "gpu memory" in sl_lower:
+                        m = re.search(r'\b(\d+)\b', sl)
+                        if m:
+                            set_if_empty("GPU_Memory_MB", m.group(1) + " GB")
+
+            # Extract GPU Brand
+            if r["Video_Brand"] == "-":
+                if "nvidia" in sl_lower or "geforce" in sl_lower or "rtx" in sl_lower or "gtx" in sl_lower:
+                    set_if_empty("Video_Brand", "NVIDIA")
+                elif "amd" in sl_lower or "radeon" in sl_lower:
+                    set_if_empty("Video_Brand", "AMD")
+                elif "intel" in sl_lower or "arc" in sl_lower:
+                    set_if_empty("Video_Brand", "Intel")
+
+            # Extract GPU Model
+            if r["GPU_Model"] == "-":
+                # Try discrete GPU patterns: RTX/GTX XXXX, Radeon RX XXXX
+                m = re.search(r'\b(?:rtx|gtx|radeon\s+rx)\s*(\d{3,4})\b', sl, re.I)
+                if m:
+                    prefix = re.search(r'(rtx|gtx|radeon\s+rx)', sl, re.I)
+                    model_str = f"{prefix.group(0).upper()} {m.group(1)}"
+                    set_if_empty("GPU_Model", model_str)
+                else:
+                    # Try integrated GPU patterns: Radeon 780M, Arc, Iris, Graphics
+                    m = re.search(r'\b(?:radeon\s+\d{3}m|arc\s+\w+|iris\s+\w+|graphics\s+\d{3,4})\b', sl, re.I)
                     if m:
                         set_if_empty("GPU_Model", m.group(0).title())
                     else:
-                        set_if_empty("GPU_Model", s)
-            
-            if r["GPU_Memory_MB"] == "-":
-                m = re.search(r'\b(\d+)\s*(?:гб|gb)\b', sl)
-                if m:
-                    set_if_empty("GPU_Memory_MB", m.group(0).upper())
+                        # Fallback: grab text after brand keyword, limited length
+                        brand_m = re.search(r'(?:nvidia|geforce|amd|radeon|intel|arc)', sl, re.I)
+                        if brand_m:
+                            start = brand_m.start()
+                            gpu_text = sl[start:].strip()
+                            # Clean up extra specs (memory, etc)
+                            gpu_text = re.sub(r',.*', '', gpu_text).strip()
+                            gpu_text = re.sub(r'\d+\s*(?:гб|gb|мб|mb)', '', gpu_text, flags=re.I).strip()
+                            if len(gpu_text) > 3 and len(gpu_text) < 60:
+                                set_if_empty("GPU_Model", gpu_text.title())
+
+            # Determine GPU Type (integrated/discrete) based on extracted data
+            if r["GPU_Type"] == "-":
+                # Check if discrete GPU
+                if r["Video_Brand"] == "NVIDIA" or "rtx" in sl_lower or "gtx" in sl_lower or "radeon rx" in sl_lower:
+                    set_if_empty("GPU_Type", "дискретна")
+                # Check if integrated GPU
+                elif r["Video_Brand"] == "Intel" or "radeon 780m" in sl_lower or "iris" in sl_lower or "arc" in sl_lower or "graphics" in sl_lower:
+                    set_if_empty("GPU_Type", "інтегрована")
+                # AMD APU check
+                elif r["Video_Brand"] == "AMD" and "radeon 680m" in sl_lower or "radeon 780m" in sl_lower:
+                    set_if_empty("GPU_Type", "інтегрована")
+                elif r["Video_Brand"] == "AMD":
+                    set_if_empty("GPU_Type", "дискретна")
 
         # OS
         if RE_OS.search(sl):
@@ -570,8 +615,8 @@ def parse_cards_from_html(html, detail_page=None):
             "Display_Contrast":  specs["Display_Contrast"],
             "Display_Response_Time": specs["Display_Response_Time"],
             "Display_Refresh_Rate": specs["Display_Refresh_Rate"],
-            "Videokarta":        specs["Videokarta"],
-            "GPU_Adapter":       specs["GPU_Adapter"],
+            "Video_Brand":       specs["Video_Brand"],
+            "GPU_Type":          specs["GPU_Type"],
             "GPU_Model":         specs["GPU_Model"],
             "GPU_Memory_MB":     specs["GPU_Memory_MB"],
             "OS":                specs["OS"],
@@ -682,7 +727,7 @@ def format_xlsx(path, total):
         "Display_Matrix_Type":"Тип матриці", "Display_Cover":"Покриття екрану",
         "Display_Brightness_nits":"Яскравість, ніт", "Display_Contrast":"Контраст",
         "Display_Response_Time":"Час реагування", "Display_Refresh_Rate":"Частота оновлення",
-        "Videokarta":"Відеокарта", "GPU_Adapter":"Відеоадаптер", "GPU_Model":"Модель GPU",
+        "Video_Brand":"Видео_Бренд", "GPU_Type":"Тип_GPU", "GPU_Model":"Модель GPU",
         "GPU_Memory_MB":"Обсяг GPU, МБ", "OS":"ОС", "Audio_Power_W":"Потужність, Вт",
         "Camera_MP":"WEB-камера, Мп", "USB_TypeA":"USB Type-A", "USB_TypeC":"USB Type-C",
         "HDMI":"HDMI, шт.", "DisplayPort":"DisplayPort, шт.", "Ports":"Порти",
