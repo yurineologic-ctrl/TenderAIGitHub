@@ -303,8 +303,10 @@ def parse_specs(items):
                     m = re.search(r'(?:Ryzen|Athlon)\s+\w+(?:\s+\w+)?', clean, re.I)
                 set_if_empty("CPU_Model", m.group(0).strip() if m else clean)
             elif "snapdragon" in cl:
-                m = re.search(r'Snapdragon\s+[\w\s-]+', clean, re.I)
-                set_if_empty("CPU_Model", m.group(0).strip() if m else clean)
+                # Require model after Snapdragon: "Snapdragon X Elite X1E-78-100"
+                m = re.search(r'Snapdragon\s+\w+(?:\s+[\w-]+)+', clean, re.I)
+                if m:
+                    set_if_empty("CPU_Model", m.group(0).strip())
             else:
                 set_if_empty("CPU_Model", clean)
 
@@ -483,7 +485,19 @@ def parse_specs(items):
             for entry in s.split("‖"):
                 e = entry.strip()
                 el = e.lower()
-                if re.match(r'(?:кеш\s*l3|l3\s*кеш)', el):
+                if re.match(r'процесор\s', el):
+                    raw = re.sub(r'^процесор\s*', '', e, flags=re.I).strip()
+                    # Strip "(кеш ... ГГц)" and trademark symbols
+                    raw = re.sub(r'\s*\([^)]*(?:мб|ггц|кеш|ghz|mb)[^)]*\)', '', raw, flags=re.I).strip()
+                    raw = re.sub(r'\s*[®™]\s*', ' ', raw).strip()
+                    if raw and r["CPU_Model"] == "-":
+                        # Try Snapdragon first
+                        ms = re.search(r'Snapdragon\s+\w+(?:\s+[\w-]+)+', raw, re.I)
+                        mi = re.search(r'Core(?:\s+Ultra)?\s+(?:i[3-9][\w-]+|\w+\s+\w+)', raw, re.I)
+                        ma = re.search(r'Ryzen\s+\d+\s+\d{4,5}\w*', raw, re.I)
+                        m = ms or mi or ma
+                        set_if_empty("CPU_Model", m.group(0).strip() if m else raw)
+                elif re.match(r'(?:кеш\s*l3|l3\s*кеш)', el):
                     val = re.sub(r'^(?:кеш\s*l3|l3\s*кеш)\s*', '', e, flags=re.I).strip()
                     if val:
                         set_if_empty("CPU_Cache_L3_MB", val)
@@ -966,7 +980,7 @@ def main():
                 if not success:
                     retry_count += 1
                     if retry_count < 2:
-                        print("\n  ⚠ Retry...", end=" ", flush=True)
+                        print("\n  [!] Retry...", end=" ", flush=True)
 
             if not success:
                 print("0 - skip")
