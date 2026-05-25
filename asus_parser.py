@@ -1,7 +1,14 @@
 import re
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
+
+# Force UTF-8 output so Cyrillic and special chars print correctly on Windows
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 import pandas as pd
 from bs4 import BeautifulSoup
@@ -13,8 +20,9 @@ from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 BASE_URL    = "https://www.asus.com"
 CATALOG_URL = "https://www.asus.com/ua-ua/store/laptops/"
 OUTPUT_PATH = Path.home() / "Desktop" / "NOUT_Asus.xlsx"
-PAGE_TIMEOUT = 45_000   # 45 сек — ASUS CDN може вантажитись повільніше
-LOAD_DETAIL_PAGES = True
+PAGE_TIMEOUT        = 45_000   # каталог
+DETAIL_PAGE_TIMEOUT = 45_000   # детальні сторінки товарів
+LOAD_DETAIL_PAGES   = True
 MAX_ITEMS = 9999
 
 COLUMNS = [
@@ -24,23 +32,100 @@ COLUMNS = [
     "RAM_Type", "RAM_Freq", "RAM_Size_GB", "RAM_Slots",
     "Nakopychuvach_SSD",
     "Display_Diagonal", "Display_Max_Resolution", "Display_Matrix_Type",
-    "Display_Cover", "Display_Brightness_nits", "Display_Contrast",
-    "Display_Response_Time", "Display_Refresh_Rate",
+    "Display_Cover", "Display_Brightness_nits", "Display_Refresh_Rate",
     "Video_Brand", "GPU_Type", "GPU_Model", "GPU_Memory_MB",
     "OS",
     "Battery_Capacity_Wh", "Camera_MP",
-    "USB_TypeA", "USB_TypeC", "HDMI", "DisplayPort", "Ports",
+    "USB_TypeA", "USB_TypeC", "HDMI",
     "Keyboard_Waterproof", "Keyboard_Ukrainian", "Keyboard_Pointing_Device",
     "Network_3G4G", "Bluetooth", "WiFi", "LAN_Mbps",
     "Certificates", "Warranty",
     "Merezha_WiFi", "Tsina_UAH", "URL",
 ]
 
+# CPU spec lookup: model_substring -> (cores, threads, base_GHz, max_GHz, cache_MB)
+# Specific models first; generic fallbacks at the end (iterated in insertion order)
+CPU_SPECS = {
+    # Intel Core Ultra 200H series (Arrow Lake-H)
+    "285H":  (20, 20, "2.0", "5.4", "24"),
+    "265H":  (16, 16, "2.0", "5.3", "24"),
+    "255H":  (16, 16, "2.0", "5.1", "24"),
+    "245H":  (14, 14, "2.0", "5.1", "24"),
+    "235H":  (14, 14, "1.9", "5.0", "24"),
+    "225H":  (14, 14, "1.7", "4.9", "18"),
+    # Intel Core Ultra 200HX series (Arrow Lake-HX)
+    "295HX": (24, 24, "2.5", "5.6", "36"),
+    "290HX": (24, 24, "2.5", "5.4", "36"),
+    "285HX": (24, 24, "2.4", "5.5", "36"),
+    "275HX": (20, 20, "2.2", "5.4", "30"),
+    "265HX": (20, 20, "2.0", "5.3", "30"),
+    "255HX": (20, 20, "1.8", "5.1", "30"),
+    # Intel Core Ultra 300H/HX series
+    "385H":  (24, 24, "2.0", "5.5", "36"),
+    "375H":  (20, 20, "2.0", "5.4", "36"),
+    "365H":  (18, 18, "2.0", "5.2", "30"),
+    "386H":  (24, 24, "2.0", "5.5", "36"),
+    # Intel Core Ultra 100H series (Meteor Lake)
+    "185H":  (16, 22, "2.3", "5.1", "24"),
+    "175H":  (16, 22, "2.3", "4.8", "24"),
+    "165H":  (16, 22, "1.4", "5.0", "24"),
+    "155H":  (16, 22, "1.4", "4.8", "24"),
+    "165U":  (12, 16, "0.9", "4.9", "12"),
+    # Intel Core 200H (Arrow Lake non-Ultra)
+    "240H":  (10, 16, "2.5", "5.2", "24"),
+    "220H":  (10, 16, "2.4", "4.9", "20"),
+    # Snapdragon X Elite / Plus / X2
+    "X2 Elite":  (12, 12, "4.0", "4.6", "42"),
+    "X Elite":   (12, 12, "3.8", "4.3", "42"),
+    "X Plus":    (10, 10, "3.4", "4.0", "42"),
+    # AMD Ryzen 7000 series (HS/HX)
+    "7940HS": (8, 16, "4.0", "5.2", "16"),
+    "7945HX": (16, 32, "2.5", "5.4", "64"),
+    "7735HS": (8, 16, "3.2", "4.75", "16"),
+    "7535HS": (6, 12, "3.3", "4.55", "16"),
+    "7435HS": (8, 16, "3.1", "4.55", "20"),
+    "7445HS": (6, 12, "3.2", "4.7",  "22"),
+    "7745HX": (8, 16, "3.6", "5.1",  "32"),
+    # AMD Ryzen AI Max / AI series (specific first)
+    "AI Max 395": (16, 32, "3.8", "5.0", "64"),
+    "AI Max 390": (12, 24, "3.6", "5.0", "64"),
+    "AI Max":     (16, 32, "3.8", "5.0", "64"),  # generic AI Max fallback
+    "AI 9 HX":    (12, 24, "3.8", "5.1", "24"),
+    "AI 7":       (8,  16, "2.0", "5.0", "16"),
+    "AI 5":       (8,  16, "2.0", "4.8", "16"),
+    # Generic Intel Core Ultra tier fallbacks (no specific SKU in model string)
+    "Ultra 9": (20, 20, "2.2", "5.4", "30"),
+    "Ultra 7": (16, 16, "1.9", "5.1", "24"),
+    "Ultra 5": (14, 14, "1.7", "4.9", "18"),
+    # Intel Core Ultra X9/X7 (ExpertBook / ZenBook Series 3)
+    "Ultra X9": (20, 20, "2.0", "5.4", "24"),
+    "Ultra X7": (16, 16, "1.7", "5.1", "24"),
+}
+
 SERIES_MAP = [
     "ROG", "TUF", "ZenBook", "VivoBook", "Vivobook", "ProArt",
     "ExpertBook", "Chromebook", "StudioBook", "OLED", "Flow",
     "Zenbook", "Expertbook",
 ]
+
+# Маппінг 2-символьного префіксу артикула -> серія
+ASUS_PN_PREFIX_SERIES = {
+    "GU": "ROG", "GX": "ROG", "G5": "ROG", "G6": "ROG",
+    "G7": "ROG", "G8": "ROG", "G9": "ROG",
+    "FA": "TUF", "FX": "TUF",
+    "UX": "ZenBook", "UM": "ZenBook", "UP": "ZenBook",
+    "BU": "ExpertBook", "B1": "ExpertBook", "B9": "ExpertBook",
+    "S3": "VivoBook", "S5": "VivoBook",
+    "K5": "VivoBook", "K4": "VivoBook", "K3": "VivoBook",
+    "X1": "VivoBook", "X4": "VivoBook", "X5": "VivoBook",
+    "M1": "VivoBook", "M3": "VivoBook", "M5": "VivoBook",
+    "PA": "ProArt",
+}
+
+# Суфікси-маркетинг, які треба прибирати з назви моделі
+_NAME_SUFFIXES = re.compile(
+    r'\s*[;,]\s*(?:Copilot\+?\s*PC|AI\s*PC|Gaming|New\s*\d{4})\s*$', re.I
+)
 
 # ── Compiled regex patterns (same as Lenovo parser) ──────────────────────────
 RE_PART_NUMBER     = re.compile(r'\(([A-Z0-9_-]{6,})\)')
@@ -50,8 +135,7 @@ RE_RESOLUTION      = re.compile(r'\d{3,4}[xх]\d{3,4}|fhd|wuxga|qhd|wqxga|uhd|4k
 RE_DISPLAY_TYPE    = re.compile(r'\b(ips|oled|tn|va|retina|nano\s*ips|amoled)\b', re.I)
 RE_DISPLAY_COVER   = re.compile(r'(антиблік|антибл|матов|глян|antiglare|gloss|matte)', re.I)
 RE_BRIGHTNESS      = re.compile(r'(?:яскравість|яскравость|brightness)[,:]?\s*(?:ніт|нит|nit)?\s*(\d+)|(\d+)\s*(?:ніт|нит|nit)', re.I)
-RE_CONTRAST        = re.compile(r'контраст|contrast', re.I)
-RE_RESPONSE_TIME   = re.compile(r'(\d+)\s*мс|(\d+)\s*ms', re.I)
+
 RE_REFRESH_RATE    = re.compile(r'(?:частота\s*оновлення|refresh\s*rate)|(?:\d+\s*(?:гц|hz).*?(?:екран|дисплей|панель|wuxga|fhd|qhd|uhd|4k|oled|ips|tn))', re.I)
 RE_CPU_FREQ        = re.compile(r'(\d+(?:[\.,]\d+)?)\s*ггц', re.I)
 RE_CPU_FREQ_GHZ    = re.compile(r'(\d+(?:[\.,]\d+)?)\s*ghz', re.I)
@@ -63,10 +147,10 @@ RE_RAM_FREQ        = re.compile(r'\b(\d{3,4})\s*(?:мгц|mhz)\b', re.I)
 RE_RAM_SIZE        = re.compile(r'\b(\d+)\s*(?:гб|gb)\b', re.I)
 RE_RAM_SLOT        = re.compile(r'(\d{1,2})\s*слот|[xх]\s*([12])(?=\s|[^0-9]|$)', re.I)
 RE_STORAGE         = re.compile(r'\b(?:ssd|hdd|nvme|емкість|накоп)\b', re.I)
-RE_GPU             = re.compile(r'\b(?:nvidia|geforce|rtx|gtx|radeon|intel graphics|arc|iris|gpu|вбудован|дискретн|відеокарт|video)\b', re.I)
+RE_GPU             = re.compile(r'\b(?:nvidia|geforce|rtx|gtx|radeon|intel graphics|uhd graphics|arc|iris|gpu|вбудован|дискретн|відеокарт|video)\b', re.I)
 RE_OS              = re.compile(r'\b(?:windows|linux|без ос|ubuntu|dos|freeDOS)\b', re.I)
 RE_BATTERY         = re.compile(r'(?:ємність|енергетична\s*ємність|battery\s*capacity)[,:]?\s*(?:(\d+)\s*)?(?:вт\*год|вт·год|wh|watt.?hour)?\s*(\d+)?', re.I)
-RE_BATTERY_WHR     = re.compile(r'(\d+(?:\.\d+)?)\s*(?:Вт·год|вт\*год|wh|вт\.год)', re.I)
+RE_BATTERY_WHR     = re.compile(r'(\d+(?:\.\d+)?)\s*(?:Вт[\s·*\-]?год|wh\b)', re.I)
 RE_CAMERA          = re.compile(r'\b(?:камера|web-камера|веб-камера|hd|4k|ir\s*camera|webcam)|\d+\s*(?:мп|mp)\b', re.I)
 RE_USB_A           = re.compile(r'\b(?:usb(?:\s*type-?a|\s*3\.?\d?|\s*2\.?\d?|\s*a)|usb-a|type-?a)\b', re.I)
 RE_USB_C           = re.compile(r'\b(?:usb(?:\s*type-?c|\s*c)|usb-c|type-?c|thunderbolt)\b', re.I)
@@ -80,7 +164,7 @@ RE_3G4G            = re.compile(r'\b(?:3g|4g|lte|nano\s*sim)\b', re.I)
 RE_BLUETOOTH       = re.compile(r'\bbt\b|bluetooth', re.I)
 RE_WIFI            = re.compile(r'\b(?:wi-fi|wifi|wireless|wlan)\b', re.I)
 RE_LAN             = re.compile(r'\b(?:lan|rj-?45|ethernet)\b', re.I)
-RE_WARRANTY        = re.compile(r'\b(?:гарант|warranty)\b', re.I)
+RE_WARRANTY        = re.compile(r'гарант|warranty', re.I)
 
 RESOLUTION_MAP = {
     "fhd":   "1920x1080",
@@ -91,14 +175,28 @@ RESOLUTION_MAP = {
     "4k":    "3840x2160",
 }
 
+# Values that mean "feature is explicitly absent" in spec data
+_ABSENT = frozenset({
+    "немає", "відсутній", "відсутня", "відсутнє", "нема",
+    "no", "none", "not available", "не підтримується",
+})
+
 
 # ── Helper functions (same logic as Lenovo parser) ────────────────────────────
 
+def clean_model_name(name):
+    """Прибирає маркетингові суфікси з назви моделі."""
+    return _NAME_SUFFIXES.sub("", name).strip()
+
+
 def detect_series(name):
+    nl = name.lower()
     for kw in SERIES_MAP:
-        if kw.lower() in name.lower():
+        if kw.lower() in nl:
             return kw
-    return "-"
+    # За 2-символьним префіксом артикула (якщо назва — артикул)
+    prefix = name[:2].upper()
+    return ASUS_PN_PREFIX_SERIES.get(prefix, "-")
 
 
 def extract_pn(name):
@@ -160,10 +258,10 @@ def parse_specs(items):
         "RAM_Type", "RAM_Freq", "RAM_Size_GB", "RAM_Slots",
         "Nakopychuvach_SSD", "Display_Diagonal", "Display_Max_Resolution",
         "Display_Matrix_Type", "Display_Cover", "Display_Brightness_nits",
-        "Display_Contrast", "Display_Response_Time", "Display_Refresh_Rate",
+        "Display_Refresh_Rate",
         "Video_Brand", "GPU_Type", "GPU_Model", "GPU_Memory_MB",
         "OS", "Battery_Capacity_Wh", "Camera_MP", "USB_TypeA", "USB_TypeC",
-        "HDMI", "DisplayPort", "Ports", "Keyboard_Waterproof",
+        "HDMI", "Keyboard_Waterproof",
         "Keyboard_Ukrainian", "Keyboard_Pointing_Device", "Network_3G4G",
         "Bluetooth", "WiFi", "LAN_Mbps", "Certificates", "Warranty",
         "Merezha_WiFi",
@@ -247,17 +345,6 @@ def parse_specs(items):
                 if val:
                     set_if_empty("Display_Brightness_nits", f"{val} nits")
 
-        if RE_CONTRAST.search(sl):
-            cm = re.search(r'(?:контраст|contrast)[:\s]+(\d+(?:\.\d+)?(?:\s*:\s*\d+)?)', sl, re.I)
-            if cm:
-                set_if_empty("Display_Contrast", cm.group(1))
-
-        if RE_RESPONSE_TIME.search(sl):
-            m = RE_RESPONSE_TIME.search(sl)
-            if m:
-                val = m.group(1) or m.group(2)
-                set_if_empty("Display_Response_Time", f"{val} мс")
-
         if RE_REFRESH_RATE.search(sl):
             freq_m = re.search(r'(\d+)\s*(?:hz|гц)\b', sl, re.I)
             if freq_m:
@@ -266,6 +353,14 @@ def parse_specs(items):
                 freq_m = re.search(r'(?:частота\s*оновлення|refresh\s*rate)\s*[:\s]+(\d+)', sl, re.I)
                 if freq_m:
                     set_if_empty("Display_Refresh_Rate", freq_m.group(1) + " Hz")
+        # Hz on a display-context line where keyword appears BEFORE Hz (e.g. "FHD 144Hz", "WQXGA 240Hz")
+        if r["Display_Refresh_Rate"] == "-":
+            if RE_RESOLUTION.search(sl) or RE_DISPLAY_TYPE.search(sl) or RE_DIAG.search(sl):
+                hz_m = re.search(r'\b(\d{2,3})\s*(?:hz|гц)\b', sl, re.I)
+                if hz_m:
+                    val = int(hz_m.group(1))
+                    if 30 <= val <= 480:
+                        set_if_empty("Display_Refresh_Rate", hz_m.group(0))
 
         # ── CPU ──────────────────────────────────────────────────────────────
         if r["CPU_Brand"] == "-":
@@ -287,7 +382,13 @@ def parse_specs(items):
             clean = re.sub(r'\s*[®™]\s*', ' ', clean).strip()
             cl = clean.lower()
             if "intel" in cl:
-                m = re.search(r'Core(?:\s+Ultra)?\s+(?:i[3-9][\w-]+|\w+\s+\w+)', clean, re.I)
+                # Patterns: "Core i7-13700H" / "Core Ultra 9 Processor 285H" / "Core Ultra X9"
+                m = re.search(
+                    r'Core(?:\s+Ultra)?\s+'
+                    r'(?:i[3-9][\w-]+|'                              # i3/i5/i7/i9
+                    r'\d+\w*(?:\s+\w+){0,2}(?:\s+\d{3,4}[A-Z]{1,3})?|'  # "9 Processor 285H"
+                    r'[A-Z]\w*(?:\s+\w*){0,2})',                     # "X9 Series 3"
+                    clean, re.I)
                 if not m:
                     m = re.search(r'(?:Celeron|Pentium|Xeon)\s+[\w-]+', clean, re.I)
                 set_if_empty("CPU_Model", m.group(0).strip() if m else clean)
@@ -340,14 +441,31 @@ def parse_specs(items):
             m = re.search(r'l3[^0-9\n]{0,20}?(\d+)\s*(?:мб|mb)?', sl, re.I)
             if m:
                 set_if_empty("CPU_Cache_L3_MB", m.group(1) + " МБ")
+        # ASUS format: "(кеш 24 МБ)" or "кеш 24 МБ" inside CPU spec
+        m = re.search(r'\bкеш\s+(\d+)\s*(?:мб|mb)\b', sl, re.I)
+        if m:
+            set_if_empty("CPU_Cache_L3_MB", m.group(1) + " МБ")
 
         # ── RAM ──────────────────────────────────────────────────────────────
         if RE_RAM_FREQ.search(sl):
             m = RE_RAM_FREQ.search(sl)
             if m:
-                set_if_empty("RAM_Freq", m.group(0) + " МГц")
+                set_if_empty("RAM_Freq", m.group(1) + " МГц")
+        # DDR speed without unit: "DDR5-4800", "DDR5 4800", "LPDDR5X-9600" — ≥2133 = valid
+        if r["RAM_Freq"] == "-" and RE_DDR.search(sl):
+            m = re.search(r'(?:lp)?ddr\d[xх]?[\s\-–](\d{4,5})(?:\s*(?:мгц|mhz))?', sl, re.I)
+            if m and int(m.group(1)) >= 2133:
+                set_if_empty("RAM_Freq", m.group(1) + " МГц")
+        # Fallback: MHz value on a RAM-context line ("Швидкість пам'яті 4800 МГц")
+        if r["RAM_Freq"] == "-":
+            if any(k in sl for k in ["пам", "швидкіст", "частот", "memory speed", "ram speed"]):
+                m = re.search(r'\b(\d{4,5})\s*(?:мгц|mhz)\b', sl, re.I)
+                if m and int(m.group(1)) >= 2133:
+                    set_if_empty("RAM_Freq", m.group(1) + " МГц")
 
-        if r["RAM_Size_GB"] == "-" and "ssd" not in sl and "hdd" not in sl and "nvme" not in sl:
+        if (r["RAM_Size_GB"] == "-"
+                and "ssd" not in sl and "hdd" not in sl and "nvme" not in sl
+                and "дисплей" not in sl and "display" not in sl):
             m = RE_RAM_SIZE.search(sl)
             if m:
                 set_if_empty("RAM_Size_GB", m.group(0).upper())
@@ -358,23 +476,51 @@ def parse_specs(items):
                 slot_num = m.group(1) or m.group(2)
                 if slot_num:
                     set_if_empty("RAM_Slots", slot_num + " слотів")
+        # ASUS "Слоти розширення: 1x DDR5 SO-DIMM ..." — digit before x
+        if 'so-dimm' in sl:
+            m = re.search(r'(\d+)[xх]\s*(?:lp)?ddr\d\s*so-dimm', sl, re.I)
+            if m:
+                set_if_empty("RAM_Slots", m.group(1))
 
         # ── Storage ──────────────────────────────────────────────────────────
         if RE_STORAGE.search(sl):
-            set_if_empty("Nakopychuvach_SSD", s.strip())
+            # Pattern 1: "SSD до 2 ТБ ..." or "накопичувач 2 ТБ ..." (compare_row format)
+            _sm = re.search(
+                r'(?:ssd\s+до|накопичувач)\s+(\d+(?:[.,]\d+)?\s*(?:тб|гб|tb|gb)[^‖\n]{0,60})',
+                s, re.I)
+            if _sm:
+                _sv = re.sub(r'[™®©]', '', _sm.group(1)).strip().rstrip(',').strip()
+                set_if_empty("Nakopychuvach_SSD", re.sub(r'\s+', ' ', _sv))
+            else:
+                # Pattern 2: "2TB M.2 5.0 NVMe PCIe 4.0 SSD" inside a long combined bullet
+                _sm = re.search(
+                    r'(\d+(?:[.,]\d+)?)\s*(?:тб|гб|tb|gb)'
+                    r'(?:\s+m\.?2(?:\s+[\d.]+)?)?'
+                    r'(?:\s+nvme(?:™)?)?'
+                    r'(?:\s+pcie(?:®)?(?:\s*[\d.]+)?(?:\s*x\d+)?)?'
+                    r'(?:\s+(?:performance|high[\s-]speed))?'
+                    r'(?:\s+(?:ssd|hdd))?',
+                    s, re.I)
+                if _sm:
+                    _sv = re.sub(r'[™®©]', '', _sm.group(0)).strip()
+                    set_if_empty("Nakopychuvach_SSD", re.sub(r'\s+', ' ', _sv))
+                elif len(s) < 100:
+                    set_if_empty("Nakopychuvach_SSD", s.strip())
 
         # ── GPU ──────────────────────────────────────────────────────────────
         if RE_GPU.search(sl):
             sl_lower = sl.lower()
 
             if r["GPU_Memory_MB"] == "-":
-                m = re.search(r'\b(\d+)\s*(?:гб|gb)\b', sl, re.I)
-                if m:
-                    set_if_empty("GPU_Memory_MB", m.group(1) + " GB")
-                elif "gpu memory" in sl_lower or "обсяг gpu" in sl_lower or "vram" in sl_lower:
-                    m = re.search(r'\b(\d+)\b', sl)
+                # Explicit VRAM keyword, OR discrete GPU (RTX/GTX/Radeon RX) — VRAM size 2-24 GB
+                vram_kw = re.search(r'gddr|vram|відеопам|gpu\s*memory|обсяг\s*gpu', sl, re.I)
+                is_discrete = any(k in sl_lower for k in ["rtx", "gtx", "radeon rx"])
+                if vram_kw or is_discrete:
+                    m = re.search(r'(\d+)\s*(?:гб|gb)', sl, re.I)
                     if m:
-                        set_if_empty("GPU_Memory_MB", m.group(1) + " GB")
+                        val = int(m.group(1))
+                        if 2 <= val <= 24:
+                            set_if_empty("GPU_Memory_MB", str(val) + " GB")
 
             if r["Video_Brand"] == "-":
                 if any(k in sl_lower for k in ["nvidia", "geforce", "rtx", "gtx"]):
@@ -407,30 +553,40 @@ def parse_specs(items):
                         brand_m = re.search(
                             r'(?:nvidia|geforce|amd|radeon|intel|arc|qualcomm|adreno)', sl, re.I)
                         if brand_m:
-                            gpu_text = sl[brand_m.start():].strip()
+                            gpu_text = s[brand_m.start():].strip()
                             gpu_text = re.sub(r',.*', '', gpu_text).strip()
                             gpu_text = re.sub(r'\d+\s*(?:гб|gb|мб|mb)', '', gpu_text, flags=re.I).strip()
                             gpu_text = re.sub(r'\s*\([^)]*\)', '', gpu_text).strip()
+                            gpu_text = re.sub(r'[™®©]', '', gpu_text).strip()  # remove trademark symbols
+                            gpu_text = re.sub(r'\s+', ' ', gpu_text).strip()
                             if 3 < len(gpu_text) < 60:
                                 set_if_empty("GPU_Model", gpu_text.title())
 
             if r["GPU_Type"] == "-":
-                if r["Video_Brand"] == "NVIDIA" or any(k in sl_lower for k in ["rtx", "gtx", "radeon rx"]):
+                sl_norm = re.sub(r'[™®©]', '', sl_lower)  # strip trademark symbols for pattern matching
+                if r["Video_Brand"] == "NVIDIA" or any(k in sl_norm for k in ["rtx", "gtx", "radeon rx"]):
                     set_if_empty("GPU_Type", "дискретна")
                 elif r["Video_Brand"] in ("Intel", "Qualcomm") or any(
-                        k in sl_lower for k in ["iris", "arc", "uhd graphics", "adreno"]):
+                        k in sl_norm for k in ["iris", "arc", "uhd graphics", "adreno"]):
                     set_if_empty("GPU_Type", "інтегрована")
                 elif r["Video_Brand"] == "AMD":
-                    if any(k in sl_lower for k in ["radeon 780m", "radeon 680m", "radeon graphics"]):
+                    if any(k in sl_norm for k in ["radeon 780m", "radeon 680m", "radeon graphics"]) \
+                            or re.search(r'radeon\s+\d{3,4}m\b', sl_norm):
                         set_if_empty("GPU_Type", "інтегрована")
+                    elif re.search(r'radeon\s+rx', sl_norm):
+                        set_if_empty("GPU_Type", "дискретна")
                     else:
                         set_if_empty("GPU_Type", "дискретна")
 
         # ── OS ───────────────────────────────────────────────────────────────
         if RE_OS.search(sl):
-            m = RE_OS.search(sl)
-            if m:
-                set_if_empty("OS", m.group(0).title())
+            win_m = re.search(r'Windows\s+\d+\s+\w+', s, re.I)
+            if win_m:
+                set_if_empty("OS", win_m.group(0))
+            else:
+                m = RE_OS.search(sl)
+                val = m.group(0).strip()
+                set_if_empty("OS", val.upper() if val.lower() in ('без ос', 'dos', 'freedos') else val.title())
 
         # ── Battery ──────────────────────────────────────────────────────────
         whr_m = RE_BATTERY_WHR.search(s)
@@ -442,20 +598,37 @@ def parse_specs(items):
                 val = m.group(1) or m.group(2)
                 if val:
                     set_if_empty("Battery_Capacity_Wh", val + " Wh")
+        # Fallback: numeric Wh value on a battery-context line
+        if r["Battery_Capacity_Wh"] == "-":
+            if any(k in sl for k in ["батар", "battery", "акумул", "ємність"]):
+                m = re.search(r'(\d+(?:\.\d+)?)\s*(?:вт|wh|watt)', sl, re.I)
+                if m:
+                    try:
+                        bval = float(m.group(1))
+                        if 20 <= bval <= 200:
+                            set_if_empty("Battery_Capacity_Wh", m.group(1) + " Wh")
+                    except ValueError:
+                        pass
 
         # ── Camera ───────────────────────────────────────────────────────────
         if RE_CAMERA.search(sl):
             cam_m = re.search(r'(\d+(?:\.\d+)?)\s*(?:мп|mp)', sl, re.I)
             if cam_m:
-                set_if_empty("Camera_MP", cam_m.group(0))
-            elif "fhd" in sl and ("camera" in sl or "камера" in sl):
+                set_if_empty("Camera_MP", cam_m.group(0).upper())
+            elif re.search(r'\b1080p?\b', sl) and ("camera" in sl or "камера" in sl or "webcam" in sl):
+                set_if_empty("Camera_MP", "FHD (1080p)")
+            elif re.search(r'\b720p?\b', sl) and ("camera" in sl or "камера" in sl or "webcam" in sl):
+                set_if_empty("Camera_MP", "HD (720p)")
+            elif "fhd" in sl and ("camera" in sl or "камера" in sl or "webcam" in sl):
                 set_if_empty("Camera_MP", "FHD")
-            elif "hd" in sl and ("camera" in sl or "камера" in sl):
+            elif "4k" in sl and ("camera" in sl or "камера" in sl or "webcam" in sl):
+                set_if_empty("Camera_MP", "4K")
+            elif "hd" in sl and ("camera" in sl or "камера" in sl or "webcam" in sl):
                 set_if_empty("Camera_MP", "HD")
 
         # ── Ports / Keyboard / Network — split on ‖ separator ────────────────
         if "‖" in s:
-            usb_a_parts, usb_c_parts, dp_parts = [], [], []
+            usb_a_parts, usb_c_parts = [], []
             for entry in s.split("‖"):
                 e  = entry.strip()
                 el = e.lower()
@@ -464,10 +637,20 @@ def parse_specs(items):
                     raw = re.sub(r'^(?:процесор|cpu)\s*', '', e, flags=re.I).strip()
                     raw = re.sub(r'\s*\([^)]*(?:мб|ггц|кеш|ghz|mb|cache)[^)]*\)', '', raw, flags=re.I).strip()
                     raw = re.sub(r'\s*[®™]\s*', ' ', raw).strip()
+                    # Strip leading navigation markers like "– до" or "до"
+                    raw = re.sub(r'^[–\-]\s*до\s+', '', raw).strip()
+                    raw = re.sub(r'^до\s+', '', raw, flags=re.I).strip()
                     if raw and r["CPU_Model"] == "-":
                         ms = re.search(r'Snapdragon\s+\w+(?:\s+[\w-]+)+', raw, re.I)
-                        mi = re.search(r'Core(?:\s+Ultra)?\s+(?:i[3-9][\w-]+|\w+\s+\w+)', raw, re.I)
-                        ma = re.search(r'Ryzen\s+\d+\s+\d{4,5}\w*', raw, re.I)
+                        mi = re.search(
+                            r'Core(?:\s+Ultra)?\s+'
+                            r'(?:i[3-9][\w-]+|'
+                            r'\d+\w*(?:\s+\w+){0,2}(?:\s+\d{3,4}[A-Z]{1,3})?|'
+                            r'[A-Za-z]\w*(?:\s+\w+){0,2})',
+                            raw, re.I)
+                        ma = re.search(r'Ryzen\s+(?:AI\s+)?(?:\w+\s+)?\w+', raw, re.I)
+                        if not ma:
+                            ma = re.search(r'(?:Ryzen|Athlon)\s+\w+(?:\s+\w+)?', raw, re.I)
                         m  = ms or mi or ma
                         set_if_empty("CPU_Model", m.group(0).strip() if m else raw)
 
@@ -496,16 +679,6 @@ def parse_specs(items):
                     if val:
                         set_if_empty("HDMI", val)
 
-                elif re.match(r'displayport[,\s]', el) or re.match(r'mini\s*dp', el):
-                    val = re.sub(r'^(?:displayport|mini\s*dp)[,\s]*(?:шт\.?\s+)?', '', e, flags=re.I).strip()
-                    if val:
-                        dp_parts.append(val)
-
-                elif re.match(r'порти\s', el) or re.match(r'interface', el):
-                    val = re.sub(r'^(?:порти|interface)\s*', '', e, flags=re.I).strip()
-                    if val and val.lower() != "немає":
-                        set_if_empty("Ports", val)
-
                 elif re.match(r'клавіатура\s*\(вологозахист\)', el) or re.match(r'splash\s*proof', el):
                     val = re.sub(r'^(?:клавіатура\s*\(вологозахист\)|splash\s*proof)\s*', '', e, flags=re.I).strip()
                     if val:
@@ -518,34 +691,63 @@ def parse_specs(items):
 
                 elif re.match(r'маніпулятори\s', el) or re.match(r'touchpad', el):
                     val = re.sub(r'^(?:маніпулятори|touchpad)\s*', '', e, flags=re.I).strip()
-                    if val and val.lower() != "немає":
-                        set_if_empty("Keyboard_Pointing_Device", val)
+                    if val:
+                        if val.lower() in _ABSENT:
+                            set_if_empty("Keyboard_Pointing_Device", "Нема")
+                        else:
+                            set_if_empty("Keyboard_Pointing_Device", val)
 
                 elif re.match(r'3g/4g\s', el) or re.match(r'lte', el):
                     val = re.sub(r'^(?:3g/4g|lte)\s*', '', e, flags=re.I).strip()
                     if val:
-                        set_from_detail("Network_3G4G", val)
+                        if val.lower() in _ABSENT:
+                            set_from_detail("Network_3G4G", "Нема")
+                        else:
+                            set_from_detail("Network_3G4G", val)
 
                 elif re.match(r'bluetooth\s', el):
                     val = re.sub(r'^bluetooth\s*', '', e, flags=re.I).strip()
-                    if val and val.lower() != "немає":
-                        set_from_detail("Bluetooth", val)
+                    val = re.sub(r'[®™]', '', val).strip()
+                    if val:
+                        if val.lower() in _ABSENT:
+                            set_from_detail("Bluetooth", "Нема")
+                        else:
+                            bt_val = ("Bluetooth " + val) if re.match(r'[\d.]', val) else val
+                            set_from_detail("Bluetooth", bt_val)
 
                 elif re.match(r'wi-fi\s', el) or re.match(r'wlan\s', el) or re.match(r'wireless\s', el):
                     val = re.sub(r'^(?:wi-fi|wlan|wireless)\s*', '', e, flags=re.I).strip()
-                    if val and val.lower() != "немає":
-                        set_from_detail("WiFi", val)
-                        set_from_detail("Merezha_WiFi", val)
+                    val = re.sub(r'[®™]', '', val).strip()
+                    if val:
+                        if val.lower() in _ABSENT:
+                            set_from_detail("WiFi", "Нема")
+                            set_from_detail("Merezha_WiFi", "Нема")
+                        else:
+                            wifi_val = ("Wi-Fi " + val) if not re.match(r'wi-?fi', val, re.I) else val
+                            set_from_detail("WiFi", wifi_val)
+                            set_from_detail("Merezha_WiFi", wifi_val)
 
                 elif re.match(r'lan\s*rj-?45', el) or re.match(r'ethernet', el):
                     val = re.sub(r'^(?:lan\s*rj-?45|ethernet)[,\s]*(?:мбіт/с\s*)?', '', e, flags=re.I).strip()
-                    if val and val.lower() != "немає":
-                        set_from_detail("LAN_Mbps", val)
-
-                elif re.match(r'сертифікати\s', el) or re.match(r'certificate', el):
-                    val = re.sub(r'^(?:сертифікати|certificate)\s*', '', e, flags=re.I).strip()
                     if val:
-                        set_from_detail("Certificates", val)
+                        if val.lower() in _ABSENT:
+                            set_from_detail("LAN_Mbps", "Нема")
+                        else:
+                            set_from_detail("LAN_Mbps", val)
+
+                elif (re.match(r'(?:екологічні\s*)?сертифікат', el)
+                      or re.match(r'certificate', el)
+                      or re.match(r'військові\s*стандарт', el)):
+                    val = re.sub(
+                        r'^(?:екологічні\s*)?(?:сертифікат\w*|certificate\w*|військові\s*стандарт\w*)\s*',
+                        '', e, flags=re.I).strip()
+                    if val:
+                        # Combine with existing value if already set
+                        existing = r.get("Certificates", "-")
+                        if existing not in ("-", "", val) and val not in existing:
+                            set_from_detail("Certificates", existing + " | " + val)
+                        else:
+                            set_from_detail("Certificates", val)
 
                 elif re.match(r'(?:термін\s*базово|warranty)', el):
                     m = re.search(r'(\d+\s*(?:рік|роки|років|місяц\w*|year|month))', e, re.I)
@@ -556,47 +758,96 @@ def parse_specs(items):
                 set_if_empty("USB_TypeA", " / ".join(usb_a_parts))
             if usb_c_parts:
                 set_if_empty("USB_TypeC", " / ".join(usb_c_parts))
-            if dp_parts:
-                set_if_empty("DisplayPort", " / ".join(dp_parts))
         else:
             # Fallback: no ‖ separator
-            if RE_USB_A.search(sl):
-                set_if_empty("USB_TypeA", s.strip())
-            if RE_USB_C.search(sl):
-                set_if_empty("USB_TypeC", s.strip())
-            if RE_HDMI.search(sl):
-                set_if_empty("HDMI", s.strip())
-            if RE_DISPLAYPORT.search(sl):
-                set_if_empty("DisplayPort", s.strip())
-            if RE_PORTS.search(sl):
-                set_if_empty("Ports", s.strip())
-            if RE_WATERPROOF.search(sl):
-                set_if_empty("Keyboard_Waterproof", "Так")
-            if RE_UKRAINIAN.search(sl):
-                set_if_empty("Keyboard_Ukrainian", "Так")
-            if RE_TOUCHPAD.search(sl):
-                set_if_empty("Keyboard_Pointing_Device", "Так")
-            if RE_3G4G.search(sl):
-                set_if_empty("Network_3G4G", "Так")
-            if RE_BLUETOOTH.search(sl):
-                set_if_empty("Bluetooth", "Так")
-            if RE_WIFI.search(sl):
-                set_if_empty("WiFi", "Так")
-                set_if_empty("Merezha_WiFi", "Так")
-            if RE_LAN.search(sl):
-                m = re.search(r'(\d{3,4})\s*(?:мбіт|mbps)', sl, re.I)
+            has_ports_kw = RE_PORTS.search(sl)
+            has_usb_a    = RE_USB_A.search(sl)
+            has_usb_c    = RE_USB_C.search(sl)
+            has_hdmi     = RE_HDMI.search(sl)
+            multi_port   = sum(map(bool, [has_usb_a, has_usb_c, has_hdmi])) > 1
+
+            if has_ports_kw or multi_port:
+                m = re.search(r'\d+(?:x|\s+порт\w*)?\s+USB[\s\d.]+(?:Gen\s*\d+\s+)?Type-?A', s, re.I)
                 if m:
-                    set_if_empty("LAN_Mbps", m.group(0))
+                    set_if_empty("USB_TypeA", m.group(0).strip())
+
+                mc = re.search(r'\d+(?:x|\s+порт\w*)?\s+USB[\s\d.]+(?:Gen\s*\d+\s+)?Type-?C(?:\s+з\s+підтримкою[^,\d\n]*)?', s, re.I)
+                tb = re.search(r'Thunderbolt\s+\d+[^,\d\n]*', s, re.I)
+                usb_c_val = mc.group(0).strip() if mc else ""
+                tb_val    = tb.group(0).strip() if tb else ""
+                combined_c = " / ".join(filter(None, [usb_c_val, tb_val]))
+                if combined_c:
+                    set_if_empty("USB_TypeC", combined_c)
+
+                m = re.search(r'\d+(?:x|\s+порт\w*)?\s+HDMI\s+[\d.]+(?:\s*,\s*TMDS)?', s, re.I)
+                if m:
+                    set_if_empty("HDMI", m.group(0).strip())
+
+            else:
+                # Single-type line
+                if has_usb_a:
+                    set_if_empty("USB_TypeA", s.strip())
+                if has_usb_c:
+                    set_if_empty("USB_TypeC", s.strip())
+                if has_hdmi:
+                    set_if_empty("HDMI", s.strip())
+            _line_absent = any(k in sl for k in ("немає", "відсутній", "відсутня", "нема"))
+            if RE_WATERPROOF.search(sl):
+                set_if_empty("Keyboard_Waterproof", "Нема" if _line_absent else "Так")
+            if RE_UKRAINIAN.search(sl):
+                set_if_empty("Keyboard_Ukrainian", "Нема" if _line_absent else "Так")
+            if RE_TOUCHPAD.search(sl):
+                set_if_empty("Keyboard_Pointing_Device", "Нема" if _line_absent else "Так")
+            if RE_3G4G.search(sl):
+                set_if_empty("Network_3G4G", "Нема" if _line_absent else "Так")
+            if RE_BLUETOOTH.search(sl):
+                if _line_absent:
+                    set_if_empty("Bluetooth", "Нема")
                 else:
-                    set_if_empty("LAN_Mbps", "Так")
+                    bt_m = re.search(r'Bluetooth[\s®™]*(\d+(?:\.\d+)?(?:\s*\+\s*LE)?)', s, re.I)
+                    set_if_empty("Bluetooth", ("Bluetooth " + bt_m.group(1).strip()) if bt_m else "Так")
+            if RE_WIFI.search(sl):
+                if _line_absent:
+                    set_if_empty("WiFi", "Нема")
+                    set_if_empty("Merezha_WiFi", "Нема")
+                else:
+                    wifi_m = re.search(r'Wi-?Fi\s*(?:\d+[eE]?\s*(?:\(802\.\d+[a-z]*\))?)', s, re.I)
+                    wifi_val = re.sub(r'\s+', ' ', re.sub(r'[®™]', '', wifi_m.group(0))).strip() if wifi_m else "Так"
+                    set_if_empty("WiFi", wifi_val)
+                    set_if_empty("Merezha_WiFi", wifi_val)
+            if RE_LAN.search(sl):
+                if _line_absent:
+                    set_if_empty("LAN_Mbps", "Нема")
+                elif "gigabit" in sl or "гігабіт" in sl:
+                    set_if_empty("LAN_Mbps", "1000 Мбіт/с")
+                else:
+                    m = re.search(r'(\d{3,4})\s*(?:мбіт|mbps)', sl, re.I)
+                    if m:
+                        set_if_empty("LAN_Mbps", m.group(0))
+                    else:
+                        set_if_empty("LAN_Mbps", "Так")
 
         # ── Warranty ─────────────────────────────────────────────────────────
-        if RE_WARRANTY.search(sl):
-            m = re.search(r'(\d+)\s*(?:місяц|рік|year|month)', sl, re.I)
+        if RE_WARRANTY.search(sl) or "термін" in sl:
+            m = re.search(r'(\d+)\s*(?:місяц\w*|рік\w*|роки|років|year\w*|month\w*)', sl, re.I)
             if m:
                 set_if_empty("Warranty", m.group(0))
-            else:
+            elif RE_WARRANTY.search(sl):
                 set_if_empty("Warranty", "Так")
+        # ── Certificates (non-‖ path) ─────────────────────────────────────────
+        if ("сертифікат" in sl or "certificate" in sl
+                or "mil-std" in sl or "energy star" in sl or "epeat" in sl
+                or "rohs" in sl):
+            cert_m = re.search(
+                r'(?:EPEAT|Energy\s+Star|RoHS|REACH|MIL-STD|FCC|CE\b|BSMI)[^\n]{0,120}',
+                s, re.I)
+            if cert_m:
+                cert_val = cert_m.group(0).strip()
+                existing = r.get("Certificates", "-")
+                if existing not in ("-", "", cert_val) and cert_val not in existing:
+                    set_if_empty("Certificates", existing + " | " + cert_val)
+                else:
+                    set_if_empty("Certificates", cert_val)
 
     # Post-process CPU details from model string
     if r["CPU_Model"] != "-":
@@ -610,6 +861,20 @@ def parse_specs(items):
         ]:
             if v:
                 set_if_empty(k, v)
+
+    # Fill missing CPU details from lookup table (for ROG / pages without compare_rows)
+    if r["CPU_Model"] != "-" and any(
+            r[k] == "-" for k in ("CPU_Cores", "CPU_Threads", "CPU_Base_Freq_GHz",
+                                   "CPU_Max_Freq_GHz", "CPU_Cache_L3_MB")):
+        model_str = r["CPU_Model"]
+        for key, (cores, threads, base, top, cache) in CPU_SPECS.items():
+            if re.search(re.escape(key), model_str, re.I):
+                set_if_empty("CPU_Cores",        str(cores))
+                set_if_empty("CPU_Threads",      str(threads))
+                set_if_empty("CPU_Base_Freq_GHz", base + " ГГц")
+                set_if_empty("CPU_Max_Freq_GHz",  top  + " ГГц")
+                set_if_empty("CPU_Cache_L3_MB",   cache + " МБ")
+                break
 
     # Search cores/threads in full text if still missing
     if r["CPU_Cores"] == "-" or r["CPU_Threads"] == "-":
@@ -628,6 +893,41 @@ def parse_specs(items):
             if threads_m:
                 set_if_empty("CPU_Threads", threads_m.group(1))
 
+    # Post-process CPU_Model: strip leftover navigation/description prefixes and suffixes
+    if r["CPU_Model"] not in ("-",):
+        cm = r["CPU_Model"]
+        cm = re.sub(r'^[–\-]\s*до\s+', '', cm).strip()       # "– до Intel ..." -> "Intel ..."
+        cm = re.sub(r'^до\s+', '', cm, flags=re.I).strip()    # "до Intel ..." -> "Intel ..."
+        cm = re.sub(r'\s+з\s+(?:графікою|відеокартою).*$', '', cm, flags=re.I).strip()  # strip " з графікою..."
+        cm = re.sub(r'\s+(?:Series\s+\d+)$', '', cm, flags=re.I).strip()  # strip trailing "Series 3"
+        cm = re.sub(r'\s+\([^)]*\)\s*$', '', cm).strip()      # strip trailing (...) if remains
+        # Strip Intel marketing word "Processor": "Core Ultra 7 Processor 255H" -> "Core Ultra 7 255H"
+        cm = re.sub(r'\s+Processor\b', '', cm, flags=re.I).strip()
+        # Strip display-size digit glued to Intel SKU suffix: "275HX18" -> "275HX", "386H14" -> "386H"
+        cm = re.sub(r'(\b\d{3,4}[A-Z]{1,3})\d{1,2}\b', r'\1', cm)
+        if cm and cm != r["CPU_Model"]:
+            r["CPU_Model"] = cm
+        # If model still looks like full marketing text (contains "до" at start), try re-extract
+        if re.match(r'^(?:процесор|до\b)', r["CPU_Model"], re.I):
+            m2 = re.search(r'(?:Core(?:\s+Ultra)?\s+\w+(?:\s+\w+){0,2}|Ryzen(?:\s+AI)?\s+\w+(?:\s+\w+)?|Snapdragon\s+\w+(?:\s+[\w-]+)+)', r["CPU_Model"], re.I)
+            if m2:
+                r["CPU_Model"] = m2.group(0).strip()
+
+    # GPU_Memory: integrated GPU never has dedicated VRAM
+    if r["GPU_Memory_MB"] == "-" and r["GPU_Type"] == "інтегрована":
+        r["GPU_Memory_MB"] = "Нема"
+
+    # 3G/4G: if we have network info (WiFi/BT found) but no 3G/4G row -> explicitly absent
+    has_network_data = r["WiFi"] not in ("-",) or r["Bluetooth"] not in ("-",)
+    if r["Network_3G4G"] == "-" and has_network_data:
+        r["Network_3G4G"] = "Нема"
+
+    # LAN: thin/consumer laptops without LAN spec -> absent
+    # ExpertBook, ROG, TUF have LAN ports — exclude them
+    _lan_series = any(k in full_text for k in ["expertbook", "rog", "tuf"])
+    if r["LAN_Mbps"] == "-" and has_network_data and not _lan_series:
+        r["LAN_Mbps"] = "Нема"
+
     # ASUS default assumptions
     if r["Bluetooth"] == "-" and "asus" in full_text:
         set_if_empty("Bluetooth", "Так")
@@ -640,85 +940,202 @@ def parse_specs(items):
 
 # ── ASUS detail-page extraction ───────────────────────────────────────────────
 
-def fetch_detail_page_text(pg, url):
-    """Fetch spec text from an ASUS product detail page."""
-    try:
-        pg.goto(url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT)
+def _build_record(series_name, model_num, price, buy_url, spec_items):
+    """Build a full record dict from spec items list."""
+    clean_name = clean_model_name(series_name)
+    specs = parse_specs(spec_items)
+    return {
+        "Seria":             detect_series(clean_name),
+        "Model":             clean_name,
+        "Part Number":       model_num if model_num != "-" else extract_pn(clean_name),
+        "CPU_Brand":         specs["CPU_Brand"],
+        "CPU_Model":         specs["CPU_Model"],
+        "CPU_Cores":         specs["CPU_Cores"],
+        "CPU_Threads":       specs["CPU_Threads"],
+        "CPU_Base_Freq_GHz": specs["CPU_Base_Freq_GHz"],
+        "CPU_Max_Freq_GHz":  specs["CPU_Max_Freq_GHz"],
+        "CPU_Cache_L3_MB":   specs["CPU_Cache_L3_MB"],
+        "RAM_Type":          specs["RAM_Type"],
+        "RAM_Freq":          specs["RAM_Freq"],
+        "RAM_Size_GB":       specs["RAM_Size_GB"],
+        "RAM_Slots":         specs["RAM_Slots"],
+        "Nakopychuvach_SSD": specs["Nakopychuvach_SSD"],
+        "Display_Diagonal":  specs["Display_Diagonal"],
+        "Display_Max_Resolution": specs["Display_Max_Resolution"],
+        "Display_Matrix_Type": specs["Display_Matrix_Type"],
+        "Display_Cover":     specs["Display_Cover"],
+        "Display_Brightness_nits": specs["Display_Brightness_nits"],
+        "Display_Refresh_Rate": specs["Display_Refresh_Rate"],
+        "Video_Brand":       specs["Video_Brand"],
+        "GPU_Type":          specs["GPU_Type"],
+        "GPU_Model":         specs["GPU_Model"],
+        "GPU_Memory_MB":     specs["GPU_Memory_MB"],
+        "OS":                specs["OS"],
+        "Battery_Capacity_Wh": specs["Battery_Capacity_Wh"],
+        "Camera_MP":         specs["Camera_MP"],
+        "USB_TypeA":         specs["USB_TypeA"],
+        "USB_TypeC":         specs["USB_TypeC"],
+        "HDMI":              specs["HDMI"],
+        "Keyboard_Waterproof":     specs["Keyboard_Waterproof"],
+        "Keyboard_Ukrainian":      specs["Keyboard_Ukrainian"],
+        "Keyboard_Pointing_Device": specs["Keyboard_Pointing_Device"],
+        "Network_3G4G":      specs["Network_3G4G"],
+        "Bluetooth":         specs["Bluetooth"],
+        "WiFi":              specs["WiFi"],
+        "LAN_Mbps":          specs["LAN_Mbps"],
+        "Certificates":      specs["Certificates"],
+        "Warranty":          specs["Warranty"],
+        "Merezha_WiFi":      specs["Merezha_WiFi"],
+        "Tsina_UAH":         price,
+        "URL":               buy_url,
+    }
 
-        # Wait for specs section to appear (up to 10 s)
-        deadline = time.time() + 10
-        while time.time() < deadline:
+
+def fetch_asus_shop_records(pg, shop_url, catalog_name, debug=False):
+    """
+    Fetch all SKU records from an ASUS /shop/ page.
+    Returns list of record dicts (one per SKU / configuration).
+    """
+    try:
+        # ASUS product comparison tables live on the /shop/ sub-page
+        url_to_load = shop_url
+        if '/shop' not in shop_url:
+            url_to_load = shop_url.rstrip('/') + '/shop/'
+
+        pg.goto(url_to_load, wait_until="load", timeout=DETAIL_PAGE_TIMEOUT)
+
+        # Wait for comparison cards (up to 25 s)
+        try:
+            pg.wait_for_selector("[class*='compareCartItem']", timeout=25_000)
+        except PWTimeout:
+            # If still showing loading spinner, wait for it to clear
             try:
-                count = pg.evaluate(
-                    "document.querySelectorAll('.asus-specificaton-table, .specs-list, "
-                    "[class*=\"spec\"], [class*=\"Spec\"]').length"
-                )
-                if count > 0:
-                    break
-            except Exception:
+                pg.wait_for_selector("[class*='PageLoading']", state="hidden", timeout=20_000)
+                pg.wait_for_timeout(2_000)
+            except PWTimeout:
                 pass
-            time.sleep(0.3)
 
         html = pg.content()
+        if debug:
+            with open("debug_asus_detail.html", "w", encoding="utf-8") as f:
+                f.write(html)
+            print("    [debug] shop page HTML saved -> debug_asus_detail.html")
+
         soup = BeautifulSoup(html, "lxml")
-        parts = []
+        records = []
 
-        # Strategy 1: ASUS specification table (common layout)
-        # Rows with th/td pairs in a specs table
-        for table in soup.select("table.asus-specificaton-table, table[class*='spec'], table[class*='Spec']"):
-            for row in table.select("tr"):
-                th = row.select_one("th")
-                td = row.select_one("td")
-                if th and td:
-                    label = th.get_text(strip=True)
-                    value = td.get_text(separator=" ", strip=True)
-                    if label and value:
-                        parts.append(f"{label} {value}")
+        # ── Per-SKU comparison cards (use cardInfo to exclude nested sub-elements)
+        sku_cards = soup.select("[class*='compareCartItem'][class*='cardInfo']")
+        if not sku_cards:
+            sku_cards = soup.select("[class*='compareCartItem']")
 
-        # Strategy 2: definition-list style specs (dl/dt/dd)
-        if not parts:
-            for dl in soup.select("dl, .specs-list, [class*='SpecList'], [class*='spec-list']"):
-                dts = dl.select("dt")
-                dds = dl.select("dd")
-                for dt, dd in zip(dts, dds):
-                    label = dt.get_text(strip=True)
-                    value = dd.get_text(separator=" ", strip=True)
-                    if label and value:
-                        parts.append(f"{label} {value}")
+        # ── Comparison table rows: list of (title, [value_per_sku]) ──────────
+        _BUY_WORDS = {'купити', 'buy', 'придбати', 'замовити', 'add to cart'}
+        compare_rows = []
+        for box in soup.select("[class*='compareListBox']"):
+            title_el = box.select_one("[class*='TitleMenuName']")
+            value_els = box.select("[class*='compareListSpecItem']")
+            if title_el and value_els:
+                title = title_el.get_text(strip=True)
+                values = [el.get_text(separator=" ", strip=True) for el in value_els]
+                # Skip "Купити" button rows
+                if all(v.strip().lower() in _BUY_WORDS or not v.strip() for v in values):
+                    continue
+                compare_rows.append((title, values))
 
-        # Strategy 3: div-based label/value pairs (ASUS React store)
-        if not parts:
-            for section in soup.select("[class*='spec'], [class*='Spec'], [class*='detail']"):
-                labels = section.select("[class*='label'], [class*='Label'], [class*='name'], [class*='Name']")
-                values = section.select("[class*='value'], [class*='Value'], [class*='desc'], [class*='content']")
-                for lbl, val in zip(labels, values):
-                    l_text = lbl.get_text(strip=True)
-                    v_text = val.get_text(separator=" ", strip=True)
-                    if l_text and v_text:
-                        parts.append(f"{l_text} {v_text}")
+        # ── pdKeySpec rows (key bullet specs per card) ────────────────────────
+        key_spec_divs = soup.select("[class*='pdKeySpec']")
 
-        # Strategy 4: any table on the page with 2 columns
-        if not parts:
-            for table in soup.select("table"):
-                for row in table.select("tr"):
-                    cells = row.select("td, th")
-                    if len(cells) >= 2:
-                        label = cells[0].get_text(strip=True)
-                        value = cells[1].get_text(separator=" ", strip=True)
-                        if label and value and len(label) < 80:
-                            parts.append(f"{label} {value}")
+        num_skus = max(len(sku_cards), len(key_spec_divs),
+                       max((len(v) for _, v in compare_rows), default=0))
+        n_compare_cols = max((len(v) for _, v in compare_rows), default=0)
+        print(f"      SKU cards={len(sku_cards)}, compare_rows={len(compare_rows)} (cols={n_compare_cols}), key_specs={len(key_spec_divs)} -> {num_skus} SKU(s) [{url_to_load.split('asus.com')[-1][:50]}]", flush=True)
+        if debug and compare_rows:
+            print("      [debug] First 5 compare_rows:")
+            for title, vals in compare_rows[:5]:
+                print(f"        '{title}' -> {vals[:3]}")
+            print(f"      [debug] First sku_card texts: {[c.get_text(' ', strip=True)[:60] for c in sku_cards[:3]]}")
 
-        # Strategy 5: scrape visible text from meta/og tags (fallback)
-        if not parts:
-            desc = soup.select_one('meta[name="description"]') or soup.select_one('meta[property="og:description"]')
-            if desc:
-                parts.append(desc.get("content", ""))
+        if num_skus == 0:
+            # Fallback: try broader selectors
+            sku_cards = soup.select("[class*='productItem'], [class*='ProductItem'], [class*='pdCard']")
+            compare_rows_alt = []
+            for box in soup.select("[class*='specItem'], [class*='SpecItem'], [class*='specRow']"):
+                title_el = box.select_one("[class*='specTitle'], [class*='specName'], [class*='title']")
+                value_els = box.select("[class*='specValue'], [class*='value']")
+                if title_el and value_els:
+                    title = title_el.get_text(strip=True)
+                    values = [el.get_text(separator=" ", strip=True) for el in value_els]
+                    compare_rows_alt.append((title, values))
+            if compare_rows_alt:
+                compare_rows = compare_rows_alt
+            num_skus = max(len(sku_cards), max((len(v) for _, v in compare_rows), default=0))
+            if num_skus:
+                print(f"      [fallback selectors] SKU cards={len(sku_cards)}, compare_rows={len(compare_rows)} -> {num_skus}", flush=True)
+            else:
+                slug = url_to_load.rstrip('/').split('/')[-2] if url_to_load.rstrip('/').endswith('/shop') else url_to_load.rstrip('/').split('/')[-1]
+                debug_path = f"debug_asus_zero_{slug[:40]}.html"
+                with open(debug_path, "w", encoding="utf-8") as f:
+                    f.write(html)
+                print(f"      [debug] 0-SKU page HTML saved -> {debug_path}", flush=True)
 
-        return " ‖ ".join(parts) if parts else ""
+        _SKIP_LINES = {'менше', 'більше', 'more', 'less', 'докладніше', 'детальніше', 'купити', 'buy'}
+
+        for i in range(num_skus):
+            # Model number from card
+            model_num = "-"
+            price     = "-"
+            buy_url   = url_to_load
+            series_name = catalog_name
+
+            if i < len(sku_cards):
+                card = sku_cards[i]
+                pn_el = card.select_one("[class*='pdModelName']")
+                if pn_el:
+                    model_num = pn_el.get_text(strip=True)
+                name_el = card.select_one("[class*='pdName']")
+                if name_el:
+                    series_name = name_el.get_text(strip=True)
+                price_el = card.select_one("[class*='pdPrice']")
+                if price_el:
+                    price = re.sub(r"[^\d\s]", "", price_el.get_text()).strip()
+                buy_el = card.select_one(
+                    "a[class*='pdBuyBtn'], a[class*='pdCard'], a[class*='pdSpec'], "
+                    "a[class*='buyBtn'], a[class*='specBtn']"
+                )
+                if buy_el:
+                    href = buy_el.get("href", "")
+                    buy_url = href if href.startswith("http") else (BASE_URL + href if href.startswith("/") else url_to_load)
+
+            # Ensure each SKU gets a unique URL so dedup doesn't collapse all to one row
+            if buy_url == url_to_load:
+                buy_url = url_to_load + (f"?sku={model_num}" if model_num != "-" else f"#sku{i}")
+
+            # Build spec_items for this SKU
+            spec_items = [series_name]
+            if model_num != "-":
+                spec_items.append(model_num)
+
+            # Key specs: split by newline (bullets may be in spans inside a single <li>)
+            if i < len(key_spec_divs):
+                raw_text = key_spec_divs[i].get_text(separator='\n', strip=True)
+                for line in raw_text.split('\n'):
+                    line = line.strip()
+                    if line and len(line) > 3 and line.lower() not in _SKIP_LINES:
+                        spec_items.append(line)
+
+            # Comparison table column i
+            for title, values in compare_rows:
+                if i < len(values) and values[i].strip():
+                    spec_items.append(f"{title} {values[i]}")
+
+            records.append(_build_record(series_name, model_num, price, buy_url, spec_items))
+
+        return records
 
     except Exception as e:
-        print(f"    [!] detail page error: {e}")
-        return ""
+        print(f"    [!] shop page error ({shop_url}): {e}")
+        return []
 
 
 # ── Catalog card extraction ───────────────────────────────────────────────────
@@ -788,6 +1205,9 @@ def _extract_cards_generic(soup):
             url = BASE_URL + href if href.startswith("/") else href
             if "asus.com" not in url:
                 continue
+            # Only laptop/notebook product pages
+            if not any(kw in url.lower() for kw in ['/laptops/', '/notebook']):
+                continue
 
             # Find name
             name = ""
@@ -820,36 +1240,76 @@ def _extract_cards_generic(soup):
     return records_raw
 
 
+
+# Тексти кнопок/посилань, які НЕ є назвами товарів
+_NAV_TEXTS = {
+    "докладніше", "детальніше", "дізнатися більше", "вибрати магазин",
+    "купити", "де купити", "read more", "learn more", "buy now",
+    "compare", "порівняти", "add to cart", "wishlist",
+}
+
+def _is_product_name(text):
+    """True if text looks like a real product name, not a nav button."""
+    t = text.strip().lower()
+    if not t or len(t) < 4:
+        return False
+    if t in _NAV_TEXTS:
+        return False
+    # Навігаційні тексти часто <= 2 слів та без цифр/брендових слів
+    asus_brands = {"asus", "rog", "tuf", "zenbook", "vivobook", "expertbook",
+                   "proart", "chromebook", "studiobook", "zephyrus", "flow"}
+    has_brand = any(b in t for b in asus_brands)
+    has_digit = bool(re.search(r'\d', t))
+    # Потрібен або бренд, або цифра в назві (серійний номер / рік / діагональ)
+    return has_brand or has_digit
+
+
 def _extract_cards_js(pg):
     """Extract product data via JavaScript evaluation when HTML selectors fail."""
     try:
         data = pg.evaluate("""
             (() => {
+                const NAV = new Set([
+                    'докладніше','детальніше','дізнатися більше','вибрати магазин',
+                    'купити','де купити','read more','learn more','buy now',
+                    'compare','порівняти','add to cart','wishlist'
+                ]);
                 const results = [];
-                // Try common ASUS product link patterns
+                // Collect links that point to individual product pages
+                // ASUS URLs: /ua-ua/laptops/asus-vivobook-s16-s3607/  (slug ≥8 alphanumeric+dash chars)
                 const links = Array.from(document.querySelectorAll('a[href]')).filter(a => {
                     const h = a.getAttribute('href') || '';
-                    return (h.includes('/laptops/') || h.includes('/notebook')) &&
-                           !h.includes('#') && a.textContent.trim().length > 5;
+                    const t = a.textContent.trim().toLowerCase();
+                    const isProductUrl = /\\/[A-Za-z0-9-]{8,}/.test(h) &&
+                                         (h.includes('/laptops/') || h.includes('/Laptops/') || h.includes('/notebook')) &&
+                                         !h.includes('#');
+                    return isProductUrl && !NAV.has(t) && t.length > 3;
                 });
-                const seen = new Set();
+                // Group by href, pick best (longest non-part-number) name
+                const byHref = {};
                 links.forEach(a => {
                     const href = a.getAttribute('href');
-                    if (seen.has(href)) return;
-                    seen.add(href);
-                    // Look for price near the link
-                    let price = '-';
-                    const parent = a.closest('[class*="product"], [class*="Product"], li, article') || a.parentElement;
-                    if (parent) {
-                        const priceEl = parent.querySelector('[class*="price"], [class*="Price"]');
-                        if (priceEl) price = priceEl.textContent.replace(/[^\\d\\s]/g, '').trim();
+                    const name = a.textContent.trim();
+                    if (NAV.has(name.toLowerCase())) return;
+                    if (!byHref[href]) {
+                        let price = '-';
+                        const parent = a.closest('[class*="product"], [class*="Product"], li, article') || a.parentElement;
+                        if (parent) {
+                            const priceEl = parent.querySelector('[class*="price"], [class*="Price"]');
+                            if (priceEl) price = priceEl.textContent.replace(/[^\\d\\s]/g, '').trim();
+                        }
+                        byHref[href] = { name, href, price };
+                    } else {
+                        // Prefer name that contains a space (not a bare part number)
+                        const cur = byHref[href].name;
+                        if (name.includes(' ') && !cur.includes(' ')) {
+                            byHref[href].name = name;
+                        } else if (name.length > cur.length && name.includes(' ')) {
+                            byHref[href].name = name;
+                        }
                     }
-                    results.push({
-                        name: a.textContent.trim(),
-                        href: href,
-                        price: price
-                    });
                 });
+                Object.values(byHref).forEach(item => results.push(item));
                 return results;
             })()
         """)
@@ -858,7 +1318,7 @@ def _extract_cards_js(pg):
         return []
 
 
-def parse_cards_from_page(pg, detail_pg=None):
+def parse_cards_from_page(pg, detail_pg=None, collected_so_far=0):
     """Parse product cards from the current page loaded in `pg`."""
     html = pg.content()
     soup = BeautifulSoup(html, "lxml")
@@ -878,7 +1338,24 @@ def parse_cards_from_page(pg, detail_pg=None):
             url = BASE_URL + href if href.startswith("/") else href
             raw_cards.append((name, url, price, None))
 
-    for name, url, price, _card in raw_cards:
+    # Фільтрація: прибираємо навігаційні тексти та дублі по URL
+    seen_urls = set()
+    filtered = []
+    for item in raw_cards:
+        name, url, price, _card = item
+        if not _is_product_name(name):
+            continue
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        filtered.append(item)
+    raw_cards = filtered
+
+    for idx, (name, url, price, _card) in enumerate(raw_cards, 1):
+        # Зупинка при досягненні MAX_ITEMS
+        if collected_so_far + len(records) >= MAX_ITEMS:
+            break
+        print(f"    [{idx}/{len(raw_cards)}] {name[:60]}", flush=True)
         specs_items = [name]
 
         # Collect any visible spec items from card HTML
@@ -889,60 +1366,21 @@ def parse_cards_from_page(pg, detail_pg=None):
                     specs_items.append(text)
 
         if detail_pg is not None and LOAD_DETAIL_PAGES:
-            detail_text = fetch_detail_page_text(detail_pg, url)
-            if detail_text:
-                specs_items.append(detail_text)
+            # ASUS shop pages contain multiple SKUs — expand into separate rows
+            sku_records = fetch_asus_shop_records(
+                detail_pg, url, catalog_name=name,
+                debug=(idx == 1 and len(records) == 0)
+            )
+            if sku_records:
+                print(f"      -> {len(sku_records)} SKU(s)", flush=True)
+                records.extend(sku_records)
+                continue  # skip fallback single-record path
 
-        specs = parse_specs(specs_items)
-        records.append({
-            "Seria":             detect_series(name),
-            "Model":             name,
-            "Part Number":       extract_pn(name),
-            "CPU_Brand":         specs["CPU_Brand"],
-            "CPU_Model":         specs["CPU_Model"],
-            "CPU_Cores":         specs["CPU_Cores"],
-            "CPU_Threads":       specs["CPU_Threads"],
-            "CPU_Base_Freq_GHz": specs["CPU_Base_Freq_GHz"],
-            "CPU_Max_Freq_GHz":  specs["CPU_Max_Freq_GHz"],
-            "CPU_Cache_L3_MB":   specs["CPU_Cache_L3_MB"],
-            "RAM_Type":          specs["RAM_Type"],
-            "RAM_Freq":          specs["RAM_Freq"],
-            "RAM_Size_GB":       specs["RAM_Size_GB"],
-            "RAM_Slots":         specs["RAM_Slots"],
-            "Nakopychuvach_SSD": specs["Nakopychuvach_SSD"],
-            "Display_Diagonal":  specs["Display_Diagonal"],
-            "Display_Max_Resolution": specs["Display_Max_Resolution"],
-            "Display_Matrix_Type": specs["Display_Matrix_Type"],
-            "Display_Cover":     specs["Display_Cover"],
-            "Display_Brightness_nits": specs["Display_Brightness_nits"],
-            "Display_Contrast":  specs["Display_Contrast"],
-            "Display_Response_Time": specs["Display_Response_Time"],
-            "Display_Refresh_Rate": specs["Display_Refresh_Rate"],
-            "Video_Brand":       specs["Video_Brand"],
-            "GPU_Type":          specs["GPU_Type"],
-            "GPU_Model":         specs["GPU_Model"],
-            "GPU_Memory_MB":     specs["GPU_Memory_MB"],
-            "OS":                specs["OS"],
-            "Battery_Capacity_Wh": specs["Battery_Capacity_Wh"],
-            "Camera_MP":         specs["Camera_MP"],
-            "USB_TypeA":         specs["USB_TypeA"],
-            "USB_TypeC":         specs["USB_TypeC"],
-            "HDMI":              specs["HDMI"],
-            "DisplayPort":       specs["DisplayPort"],
-            "Ports":             specs["Ports"],
-            "Keyboard_Waterproof":     specs["Keyboard_Waterproof"],
-            "Keyboard_Ukrainian":      specs["Keyboard_Ukrainian"],
-            "Keyboard_Pointing_Device": specs["Keyboard_Pointing_Device"],
-            "Network_3G4G":      specs["Network_3G4G"],
-            "Bluetooth":         specs["Bluetooth"],
-            "WiFi":              specs["WiFi"],
-            "LAN_Mbps":          specs["LAN_Mbps"],
-            "Certificates":      specs["Certificates"],
-            "Warranty":          specs["Warranty"],
-            "Merezha_WiFi":      specs["Merezha_WiFi"],
-            "Tsina_UAH":         price,
-            "URL":               url,
-        })
+        # Fallback: no detail page or shop page returned nothing
+        records.append(_build_record(
+            series_name=name, model_num="-", price=price,
+            buy_url=url, spec_items=specs_items
+        ))
 
     return records
 
@@ -1083,13 +1521,12 @@ def format_xlsx(path, total):
         "Nakopychuvach_SSD": "M.2 SSD, ГБ",
         "Display_Diagonal": "Діагональ екрана", "Display_Max_Resolution": "Макс. роздільна здатність",
         "Display_Matrix_Type": "Тип матриці", "Display_Cover": "Покриття екрану",
-        "Display_Brightness_nits": "Яскравість, ніт", "Display_Contrast": "Контраст",
-        "Display_Response_Time": "Час реагування", "Display_Refresh_Rate": "Частота оновлення",
+        "Display_Brightness_nits": "Яскравість, ніт", "Display_Refresh_Rate": "Частота оновлення",
         "Video_Brand": "Видео_Бренд", "GPU_Type": "Тип_GPU", "GPU_Model": "Модель GPU",
         "GPU_Memory_MB": "Обсяг GPU, МБ", "OS": "ОС",
         "Battery_Capacity_Wh": "Енергетична ємність, Вт*год",
         "Camera_MP": "WEB-камера, Мп", "USB_TypeA": "USB Type-A", "USB_TypeC": "USB Type-C",
-        "HDMI": "HDMI, шт.", "DisplayPort": "DisplayPort, шт.", "Ports": "Порти",
+        "HDMI": "HDMI, шт.",
         "Keyboard_Waterproof": "Клавіатура (вологозахист)", "Keyboard_Ukrainian": "Українська мова",
         "Keyboard_Pointing_Device": "Маніпулятори", "Network_3G4G": "3G/4G",
         "Bluetooth": "Bluetooth", "WiFi": "Wi-Fi", "LAN_Mbps": "LAN RJ-45, Мбіт/с",
@@ -1118,7 +1555,7 @@ def format_xlsx(path, total):
             cell.fill      = AFILL if r % 2 == 0 else PatternFill()
             cell.alignment = Alignment(vertical="top", wrap_text=True)
             cell.border    = brd
-        ws.row_dimensions[r].height = 45
+        # No explicit height -> Excel auto-fits based on cell content + wrap_text
 
     for i in range(1, len(COLUMNS) + 1):
         ws.column_dimensions[get_column_letter(i)].width = 20
@@ -1180,7 +1617,7 @@ def main():
         print()
 
         # Parse page 1 (already loaded)
-        recs = parse_cards_from_page(pg, pg)
+        recs = parse_cards_from_page(pg, pg, collected_so_far=0)
         all_records.extend(recs)
         print(f"  [1/{total_pages}] зібрано {len(recs)} (всього: {len(all_records)})")
 
@@ -1199,7 +1636,7 @@ def main():
                 url = url_pattern.replace("{page}", str(page_num))
                 ok  = load_page_and_wait(pg, url)
                 if ok:
-                    recs = parse_cards_from_page(pg, pg)
+                    recs = parse_cards_from_page(pg, pg, collected_so_far=len(all_records))
                     if recs:
                         all_records.extend(recs)
                         print(f"зібрано {len(recs)} (всього: {len(all_records)})")
@@ -1221,7 +1658,7 @@ def main():
                     if more_btn:
                         more_btn.click()
                         time.sleep(2)
-                        recs = parse_cards_from_page(pg, pg)
+                        recs = parse_cards_from_page(pg, pg, collected_so_far=len(all_records))
                         if recs:
                             all_records.extend(recs)
                             print(f"зібрано {len(recs)} (всього: {len(all_records)})")
